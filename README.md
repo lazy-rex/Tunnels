@@ -44,5 +44,7 @@ lazyrex-hub test
 
 `tests/tunnels-lab.mjs` is the earlier Node lab test. It stays only for two renderer checks that no
 LazyRex view test covers yet: the text of a closed select field on screen, and the first focused
-control of a new panel. The Lua tests cover everything else it checks. Do not run it by hand: it
+control of a new panel. The Lua tests and the shared LazyRex renderer tests (view package) cover
+its other checks, except the checks with a real public tunnel (`TUNNELS_REAL=1`), which no test
+replaces: tests never publish a port. Do not run it by hand: it
 does not isolate HOME, and it can write opentunnel route files in your real configuration.
