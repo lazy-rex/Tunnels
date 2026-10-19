@@ -39,7 +39,6 @@ local function forward_by_user(p)
   form:render()
   local op = form:action('forward', 'forward', {values = {port = 'other', other = tostring(p)}})
   expect(op.status).to_be('succeeded')
-  user:view('/panels/tunnels', 'tunnels', S):render() -- the Forward result opens the panel; wait until its renderer runs
   return wait('the forward of ' .. p, function()
     for _, f in pairs(alice:call('tunnels.list', {}).forwards or {}) do if f.port == p then return f end end
   end, 15)

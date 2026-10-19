@@ -133,7 +133,6 @@ test('closing the session ends its tunnel; the panel and the list drop it', func
   local first = node(form:render(), 'forward').fields[1].options[1]
   expect(first.label).to_match('^' .. p .. ' · nc · web2')
   expect(T.submit(form, first.value).status).to_be('succeeded')
-  T.panel(S2) -- the Forward result opens the panel; wait until its renderer runs
   wait('the second tunnel block', function() return #T.tunnel_blocks(S2) == 1 end, 20)
   local f = wait('the list shows it', function() return T.forward_of(p, alice) end, 10)
   -- The panel in the first session lists the forward of the other session.
