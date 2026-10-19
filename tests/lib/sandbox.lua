@@ -2,15 +2,16 @@
 -- no process and reaches no Rex server or hub. Usage:
 --   local sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
 --   local s = sandbox(plugin_dir, base_env, {vars = {...}, executables = {[path] = true},
---     catalog = <forwards record value>, rex = {[method] = function(args) return result, err end}})
+--     catalog = <forwards record value>, ops = {[key] = {fingerprint, result}},
+--     rex = {[method] = function(args) return result, err end}})
 -- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
--- catalog, and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
+-- catalog, the saved operation records (ops), and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
 -- s:tick() runs the timers that the plugin set.
 return function(plugin_dir, base, opts)
   opts = opts or {}
   local vars, executables, overrides = opts.vars or {}, opts.executables or {}, opts.rex or {}
   local catalog = opts.catalog or {}
-  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = catalog}
+  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = catalog, ops = opts.ops or {}}
   local stub = {
     args = {hub_client_id = 'hub', instance_id = 'instance', plugin_session = 'plugin'},
     on = function(name, fn) s.handlers[name] = fn end,
@@ -24,8 +25,16 @@ return function(plugin_dir, base, opts)
       if overrides[method] then return overrides[method](args) end
       if method == 'client.perform' then
         if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = '1', value = catalog}}}} end
-        if args.action == 'hub.store.op' then return {result = {found = false}} end
-        if args.action == 'hub.store.batch' then catalog = args.args.ops[1].value; s.catalog = catalog; return {result = {revs = {forwards = '2'}}} end
+        if args.action == 'hub.store.op' then
+          local op = s.ops[args.args.key]
+          if op then return {result = {found = true, fingerprint = op.fingerprint, result = op.result}} end
+          return {result = {found = false}}
+        end
+        if args.action == 'hub.store.batch' then
+          catalog = args.args.ops[1].value; s.catalog = catalog
+          if args.args.op then s.ops[args.args.op.key] = args.args.op end
+          return {result = {revs = {forwards = '2'}}}
+        end
         return {result = {}}
       end
       if method == 'session.list' then return {sessions = {{session_id = 's'}}} end

@@ -114,3 +114,42 @@ test('a Rex error without a code, or with timeout, stays unavailable (sandbox)',
     expect(reply.error.code, text).to_be('unavailable')
   end
 end)
+
+-- A definite Rex refusal of the tunnel create: no block exists, so the intent must not stay as an
+-- unknown result that holds the port. The text is what Rex 0.0.1792158932-g88fd41 gave in the lab
+-- for a label over 128 characters.
+local function form_forward(s, key, port)
+  return s:perform('view.action', {user = 'user', route = '/forms/forward', node_id = 'forward', action = 'forward',
+    input = {values = {port = 'other', other = tostring(port)}}, context = {session_id = 's', source_block_id = 'src'}, operation_key = key})
+end
+local function create_sandbox(create)
+  local s = load_sandbox(T.plugin_dir, base, {
+    vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
+    rex = {['session.new_block'] = create}})
+  assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
+  return s
+end
+
+test('a definite Rex refusal of the tunnel create ends the Forward with its code and keeps no intent (sandbox)', function()
+  local calls = 0
+  local s = create_sandbox(function() calls = calls + 1; return nil, rex_text('input: validating: label must be at most 128 characters', 400, 'bad_request') end)
+  local reply = form_forward(s, 'refused-create', 4321)
+  assert_true(reply.error, 'Forward fails')
+  expect(reply.error.code).to_be('bad_request')
+  expect(reply.error.message).to_match('label must be at most 128 characters')
+  expect(next(s.catalog.intents or {}), 'no intent holds the port').to_be(nil)
+  expect(next(s.catalog.cleanups or {}), 'no cleanup: no block ran').to_be(nil)
+  -- The key replays the refusal; it never creates again.
+  local again = form_forward(s, 'refused-create', 4321)
+  expect(again.error.code).to_be('bad_request')
+  expect(calls, 'one create').to_be(1)
+end)
+
+test('a Rex create error without a definite code keeps the intent as an unknown result (sandbox)', function()
+  for _, text in ipairs({rex_text('connection reset'), rex_text('deadline', 504, 'timeout')}) do
+    local s = create_sandbox(function() return nil, text end)
+    local reply = form_forward(s, 'lost-create', 4321)
+    expect(reply.error.code, text).to_be('unavailable')
+    expect(s.catalog.intents['lost-create'].port).to_be(4321)
+  end
+end)

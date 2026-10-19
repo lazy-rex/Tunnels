@@ -538,6 +538,17 @@ local function forward(args)
   local created, err = rex.call('session.new_block', {session_id = intent.session_id, flavor = 'com.superlogical.terminal.shell',
     label = label_prefix .. id, options = {command = command, login = false, exit = {on_completion = false}}})
   if not (created and created.block_id) then
+    local _, e = pcall(function()
+      if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Rex request failed') end
+      text_error(err, 'Rex request failed')
+    end)
+    if type(e) == 'table' and e.code ~= 'unavailable' then
+      -- A definite refusal: Rex created no block. The intent and its port go; the key replays the error.
+      local result = {error = {code = e.code, message = e.message}}
+      update(function(s) s.intents[id] = nil end, {key = id, fingerprint = intent.fingerprint, result = result})
+      invalidate()
+      fail(e.code, e.message)
+    end
     -- The outcome can be unknown. The intent stays; the panel shows it and looks for its label.
     invalidate()
     fail('unavailable', 'Rex did not confirm the tunnel block: ' .. message(err))
