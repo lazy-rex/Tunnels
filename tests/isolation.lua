@@ -13,46 +13,13 @@ test('the lab forces the fake opentunnel and private paths', function()
   dofile(tests_dir .. '/lib/guard.lua')(tests_dir)
 end)
 
--- sandbox loads tunnels.lua with the environment vars and the executables given. It answers the
--- stub state: the client_perform_requested handler, the replies and the new_block calls.
-local function sandbox(vars, executables)
-  local s = {handlers = {}, creates = {}, execs = {}}
-  local stub = {
-    args = {hub_client_id = 'hub', instance_id = 'instance', plugin_session = 'plugin'},
-    on = function(name, fn) s.handlers[name] = fn end,
-    after = function() end, -- No timer runs: maintenance stays off.
-    exec = function(argv)
-      s.execs[#s.execs + 1] = argv
-      if argv[1] == '/bin/test' and argv[2] == '-x' then return {ok = executables[argv[3]] == true} end
-      error('the sandbox runs no process: ' .. tostring(argv[1]))
-    end,
-    call = function(method, args)
-      if method == 'client.perform' then
-        if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = '1', value = {}}}}} end
-        if args.action == 'hub.store.op' then return {result = {found = false}} end
-        if args.action == 'hub.store.batch' then return {result = {revs = {forwards = '2'}}} end
-        return {result = {}}
-      end
-      if method == 'session.list' then return {sessions = {{session_id = 's'}}} end
-      if method == 'session.list_blocks' then return {blocks = {}} end
-      if method == 'session.new_block' then s.creates[#s.creates + 1] = args; return {block_id = 'new'} end
-      if method == 'client.reply' then s.reply = args end
-      return {}
-    end,
-  }
-  local base = getfenv(1)
-  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end}, {__index = os})}, {__index = base})
-  local chunk = assert(loadfile(plugin_dir .. '/tunnels.lua'))
-  setfenv(chunk, env)
-  s.loaded, s.load_error = pcall(chunk)
-  return s
-end
+local load_sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
+local base = getfenv(1)
+local function sandbox(vars, executables) return load_sandbox(plugin_dir, base, {vars = vars, executables = executables}) end
 
 local function forward(s)
-  s.handlers.client_perform_requested({}, {requester = {client_id = 'hub'}, action = 'view.action', call_id = 'c', args = {
-    user = 'user', route = '/forms/forward', node_id = 'forward', action = 'forward', operation_key = 'isolation-1',
-    input = {values = {port = 'other', other = '4321'}}, context = {session_id = 's'}}})
-  return s.reply
+  return s:perform('view.action', {user = 'user', route = '/forms/forward', node_id = 'forward', action = 'forward',
+    operation_key = 'isolation-1', input = {values = {port = 'other', other = '4321'}}, context = {session_id = 's'}})
 end
 
 local function refused(vars, executables, pattern)
