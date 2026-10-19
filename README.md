@@ -68,3 +68,16 @@ lazyrex-hub test
 
 The shared LazyRex renderer tests (view package) cover the generic keyboard, focus and screen
 behavior of the forms and panels.
+
+### Known issue: one unexplained stop.lua failure
+
+During the port, one run of `tests/stop.lua` failed once on a count check (the second count). The
+cause is not known. That run kept no lab, so nobody could inspect it.
+
+- Suspected cause (not proven): the old test helper turned a failed read into 0.
+- Commit 3f76a4a makes the helper strict and adds helper tests. If the failure occurs again, the
+  helper reports its cause.
+- The failure did not occur again in more than 30 later runs (status at 7b65510).
+
+If `tests/stop.lua` fails on a count, keep the lab (`lazyrex-hub test -keep`) and record the helper
+error here.
