@@ -27,13 +27,22 @@ Forward Port… has no agent action yet: an agent that publishes a local port wa
 
 ## Tests
 
-The tests use `../LazyRex` (the client library in `lib/` and the lab harness in `lab/`).
-Start an isolated lab server first, and never point tests at your own Rex server:
+Run the tests with `lazyrex-hub test` in this directory (LazyRex `docs/testing.md`). The command
+starts its own lab Rex server and the real hub in test mode. Each lab has a private HOME, XDG and
+TMPDIR. `lazyrex.json` sets the lab environment: the stand-in `tests/fake-opentunnel.sh` instead of
+the real opentunnel, a fake state directory in the lab, and the `lazyrexlab-` profile prefix. No
+test opens a public tunnel.
 
 ```sh
-../LazyRex/lab/server.sh /tmp/rexlab
-REX_SERVER=unix:///tmp/rexlab/rex.sock node tests/<name>.mjs
+lazyrex-hub test
 ```
 
-- legacy/tunnels-ports-unit.lua, legacy/tunnels-cleanup-contract.lua
-- tunnels-lab.mjs, tunnels-ports-lab.mjs (lab; `fake-opentunnel.sh` stands in for the real CLI)
+- `tests/*.lua`: the tests. Each file that forwards a port first runs `tests/lib/guard.lua`, which
+  fails the file unless the lab forces the stand-in binary and private paths.
+- `tests/lib/`: shared helpers (not test files).
+- `tests/fake-opentunnel.sh`: the stand-in for the opentunnel CLI.
+
+`tests/tunnels-lab.mjs` is the earlier Node lab test. It stays only for two renderer checks that no
+LazyRex view test covers yet: the text of a closed select field on screen, and the first focused
+control of a new panel. The Lua tests cover everything else it checks. Do not run it by hand: it
+does not isolate HOME, and it can write opentunnel route files in your real configuration.
