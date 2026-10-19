@@ -25,19 +25,30 @@ local function fail(code, message) error({code = code, message = message}) end
 local plugin_dir = assert(debug.getinfo(1, 'S').source:match('^@?(/.*)/[^/]*$'), 'The plugin path is unknown')
 -- Lab only: another profile prefix keeps lab tunnels apart from real ones. XDG directories cannot
 -- isolate a lab: the launchd service that `opentunnel up` registers gets no XDG variables (0.5.2).
--- The hub config passes no plugin arguments. A lab sets these in the lab server's environment,
--- which its panes inherit (spikes/lab/server.sh).
-local profile_prefix = os.getenv('LAZYREX_TUNNELS_PROFILE_PREFIX') or 'lazyrex-'
+-- The hub config passes no plugin arguments. A lab sets these in the environment of the hub, which
+-- its plugins inherit (lazyrex.json "env"). A prefix ends with '-', so a profile name ends with the port.
+local default_prefix = 'lazyrex-'
+local profile_prefix = os.getenv('LAZYREX_TUNNELS_PROFILE_PREFIX') or default_prefix
+assert(profile_prefix:match('^[%w_][%w_%-]*%-$'), 'LAZYREX_TUNNELS_PROFILE_PREFIX must be letters, digits, _ or - and end with -')
 local label_prefix = 'lazyrex-tunnel:'
--- A Rex pane does not get a login PATH, so look for the binary in the usual install places.
+local function executable(path) local r = rex.exec({'/bin/test', '-x', path}, {timeout = 5}); return r and r.ok end
+-- find_opentunnel answers the binary, or nil and the reason. A configured binary must be an absolute
+-- executable path. A lab prefix uses only the stand-in of this checkout, plugin_dir/tests/fake-opentunnel.sh,
+-- by its exact path: a lab never reaches the real opentunnel. A Rex pane does not get a login PATH, so without a configured
+-- binary the plugin looks in the usual install places.
 local function find_opentunnel()
   local configured = os.getenv('LAZYREX_TUNNELS_OPENTUNNEL')
-  if configured and configured ~= '' then return configured end
+  if configured and configured ~= '' then
+    if configured:sub(1, 1) ~= '/' or not executable(configured) then return nil, 'LAZYREX_TUNNELS_OPENTUNNEL must be an absolute path to an executable' end
+    if profile_prefix ~= default_prefix and configured ~= plugin_dir .. '/tests/fake-opentunnel.sh' then return nil, 'A lab profile prefix needs the fake opentunnel' end
+    return configured
+  end
+  if profile_prefix ~= default_prefix then return nil, 'A lab profile prefix needs the fake opentunnel' end
   local home = os.getenv('HOME') or ''
   for _, path in ipairs({'/opt/homebrew/bin/opentunnel', '/usr/local/bin/opentunnel', home .. '/.cargo/bin/opentunnel', home .. '/.local/bin/opentunnel'}) do
-    local r = rex.exec({'/bin/test', '-x', path}, {timeout = 5})
-    if r and r.ok then return path end
+    if executable(path) then return path end
   end
+  return nil, 'opentunnel is not installed. Install it with: brew install anomalyco/tap/opentunnel'
 end
 
 local function hub(action, args)
@@ -208,8 +219,8 @@ local function advance_cleanups()
       elseif not by_id then set_cleanup(profile, function(x) x.phase, x.retry_at = 'retry', now end) end
       -- Otherwise the create result stays unknown: the profile stays owned.
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
-      local opentunnel = find_opentunnel()
-      if not opentunnel then cleanup_errors[profile] = 'opentunnel is not installed'
+      local opentunnel, why = find_opentunnel()
+      if not opentunnel then cleanup_errors[profile] = why
       else
         cleanup_seq = cleanup_seq + 1
         local key = instance_id .. '-' .. now .. '-' .. cleanup_seq
@@ -362,8 +373,8 @@ local function forward(args)
   end
   if not sessions()[intent.session_id] then fail('not_found', 'The session of this port is closed') end
   -- Check the binary before the intent is saved: a request that is never sent must not hold a port.
-  local opentunnel = find_opentunnel()
-  if not opentunnel then fail('not_found', 'opentunnel is not installed. Install it with: brew install anomalyco/tap/opentunnel') end
+  local opentunnel, why = find_opentunnel()
+  if not opentunnel then fail('not_found', why) end
   intent.profile = profile_prefix .. intent.port
   intent.fingerprint = fingerprint
   intent.created = os.date('!%Y-%m-%dT%H:%M:%SZ')
