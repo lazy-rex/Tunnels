@@ -37,9 +37,10 @@ plugin session (`tunnels-down.sh`). Forward refuses the port until that cleanup 
   until a close succeeds or a Rex listing shows that the block is gone.
 - An attempt that ends without a receipt after the plugin adopted it runs again.
 - An attempt that something else stops before the plugin adopts it cannot be proven. A block with only
-  its label is no proof, because the original create can still arrive. Its profile stays reserved,
-  and the user must recover it: remove the cleanup record, after a check that no `down` of that
-  profile still runs.
+  its label is no proof, because the original create can still arrive. Its profile stays reserved.
+  No safe manual recovery exists yet: it must first prove that no original create can arrive and
+  that no `down` of the profile remains. A check that no `down` runs now is not enough. This case
+  needs investigation; until then, keep the reservation.
 
 ## Tests
 
