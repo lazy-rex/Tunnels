@@ -447,8 +447,8 @@ local function render_form(args)
   nodes[#nodes + 1] = {id = 'forward', type = 'form', label = 'Forward a port', fields = {
     {id = 'port', label = 'Port', kind = 'select', required = true, value = options[1].value, options = options},
     {id = 'other', label = 'Other port (for "Other port…")', kind = 'text', required = false, value = ''},
-  }, submit_action = {name = 'forward', label = 'Forward', enabled = true}}
-  nodes[#nodes + 1] = {id = 'rescan', type = 'widget', text = 'The list is from the last scan.', action = {name = 'rescan', label = 'Rescan', enabled = true}}
+  }, submit_action = {name = 'forward', label = 'Forward', enabled = true, user_only = 'publishes a local port; awaiting decision'}}
+  nodes[#nodes + 1] = {id = 'rescan', type = 'widget', text = 'The list is from the last scan.', action = {name = 'rescan', label = 'Rescan', enabled = true, tool = 'tunnels.ports'}}
   nodes[#nodes + 1] = {id = 'notice', type = 'widget', text = 'Anyone with the URL can reach the port. The tunnel does not ask visitors to sign in.'}
   return {title = 'Forward Port', nodes = nodes}
 end
@@ -477,8 +477,8 @@ local function render_panel()
       node_id = 'fw/' .. row.block_id
       local shown = row.block.placement ~= 'detached'
       local name = shown and 'hide' or 'show'
-      items[#items + 1] = {id = name, label = shown and 'Hide Logs' or 'Show Logs', detail = '', action = {name = name, label = shown and 'Hide Logs' or 'Show Logs', enabled = true}}
-      items[#items + 1] = {id = 'stop', label = 'Stop', detail = '', action = {name = 'stop', label = 'Stop', enabled = true}}
+      items[#items + 1] = {id = name, label = shown and 'Hide Logs' or 'Show Logs', detail = '', action = {name = name, label = shown and 'Hide Logs' or 'Show Logs', enabled = true, user_only = 'navigation'}}
+      items[#items + 1] = {id = 'stop', label = 'Stop', detail = '', action = {name = 'stop', label = 'Stop', enabled = true, tool = 'tunnels.stop'}}
     else
       -- No action: the port stays reserved until Rex proves the block or the session closes.
       node_id = 'intent/' .. row.intent_id
@@ -500,7 +500,7 @@ local function render_panel()
   if #rows == 0 and #pending == 0 and ok then nodes[#nodes + 1] = {id = 'empty', type = 'widget', text = 'No ports are forwarded.'} end
   if #rows > 0 or #pending > 0 then arm_refresh((running < #rows or #pending > 0) and 2 or 15) end
   kick()
-  nodes[#nodes + 1] = {id = 'new', type = 'widget', text = 'Forward a port from a pane', action = {name = 'new', label = 'Forward Port…', enabled = true}}
+  nodes[#nodes + 1] = {id = 'new', type = 'widget', text = 'Forward a port from a pane', action = {name = 'new', label = 'Forward Port…', enabled = true, user_only = 'navigation'}}
   return {title = running > 0 and ('Tunnels (' .. running .. ' connected)') or 'Tunnels', nodes = nodes}
 end
 
@@ -533,8 +533,9 @@ for name in pairs(handlers) do actions[#actions + 1] = {name = name, kind = 'cli
   args = {type = 'object', additionalProperties = true}} end
 rex.call('client.keymap', {actions = actions})
 hub('hub.register', {plugin = 'tunnels', instance_id = instance_id, exports = {}, commands = {
-  {id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true},
-  {id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward'},
+  {id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true, user_only = 'navigation'},
+  {id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward',
+    user_only = 'publishes a local port; awaiting decision'},
 }})
 -- A tunnel block that exits or closes, or a closed session, changes the panel.
 rex.on('terminal.child_exited', function() invalidate(); kick() end)

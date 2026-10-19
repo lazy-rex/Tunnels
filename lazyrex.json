@@ -1,0 +1,17 @@
+{
+ "name": "tunnels",
+ "main": "tunnels.lua",
+ "events": "all",
+ "test": {
+  "agents": [
+   {
+    "id": "alice",
+    "name": "Alice"
+   },
+   {
+    "id": "bob",
+    "name": "Bob"
+   }
+  ]
+ }
+}
