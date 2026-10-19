@@ -157,7 +157,7 @@ The maintainer approved one real lab tunnel per test run to a 127.0.0.1 test ser
 
 **Verified-source (v0.5.2):** `serve` does not create an identity. Only `up` and `route add` create one, and both register the launchd service `xyz.opentunnel.<profile>`. `down` removes the registration. The launchd plist sets only `OPENTUNNEL_DAEMON`, so XDG directories cannot isolate a lab profile.
 
-**Observed (lab, `tests/tunnels-lab.mjs` with `TUNNELS_REAL=1`):**
+**Observed (lab, `tests/tunnels-lab.mjs` with `TUNNELS_REAL=1`; that test is removed, see the git history):**
 
 - A new profile prints "Waiting for certificate verification (this can take a few minutes)". It took about one minute in three runs.
 - `up` then `down` left no plist in `~/Library/LaunchAgents`. The route file `~/.config/opentunnel/<profile>.toml` with `"@" = "127.0.0.1:<port>"` and a foreground `serve` connected: `serve` logs `event={"type":"connecting",...}` and then `event={"type":"connected",...}`.

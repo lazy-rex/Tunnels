@@ -1,2 +1,2 @@
-# Keep the tests (Lua, and one Node script) out of the language stats.
+# Keep the tests out of the language stats.
 tests/** linguist-detectable=false
