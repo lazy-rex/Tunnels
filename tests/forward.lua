@@ -26,7 +26,7 @@ test('the form lists the pane port first; Forward starts one detached block and 
   tblock = blocks[1].block_id
   expect(blocks[1].placement).to_be('detached')
   local cat = T.catalog()
-  expect(next(cat.intents or {})).to_be(nil)
+  expect((next(cat.intents or {}))).to_be(nil)
   local fw = cat.forwards[tblock]
   expect(fw.session_id).to_be(S)
   expect(fw.source_block).to_be(web.block)
@@ -86,7 +86,7 @@ test('Stop from the panel empties the panel and the list', function()
   expect(v:action('fw/' .. tblock, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
   wait('no tunnel block', function() return #T.tunnel_blocks(S) == 0 end, 10)
   wait('the panel is empty', function() return T.row(v, 'empty') ~= nil end, 10)
-  expect(next(T.list(alice).forwards or {})).to_be(nil)
+  expect((next(T.list(alice).forwards or {}))).to_be(nil)
   T.no_cleanup_for(P)
 end)
 
@@ -133,6 +133,7 @@ test('closing the session ends its tunnel; the panel and the list drop it', func
   local first = node(form:render(), 'forward').fields[1].options[1]
   expect(first.label).to_match('^' .. p .. ' · nc · web2')
   expect(T.submit(form, first.value).status).to_be('succeeded')
+  T.panel(S2) -- the Forward result opens the panel; wait until its renderer runs
   wait('the second tunnel block', function() return #T.tunnel_blocks(S2) == 1 end, 20)
   local f = wait('the list shows it', function() return T.forward_of(p, alice) end, 10)
   -- The panel in the first session lists the forward of the other session.
@@ -141,7 +142,7 @@ test('closing the session ends its tunnel; the panel and the list drop it', func
   close_session(S2)
   wait('the panel drops the closed session', function() return T.row(v, 'fw/' .. f.id) == nil end, 20)
   expect(T.forward_of(p, alice)).to_be(nil)
-  expect(next(T.catalog().forwards or {})).to_be(nil)
+  expect((next(T.catalog().forwards or {}))).to_be(nil)
   T.no_cleanup_for(p)
 end)
 

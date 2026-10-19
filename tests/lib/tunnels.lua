@@ -95,6 +95,9 @@ return function(E, tests_dir)
     for _, b in ipairs(T.tunnel_blocks(pane.session)) do before[b.block_id] = true end
     local op = T.submit(T.open_form(pane), p)
     if op.status ~= 'succeeded' then error('Forward of ' .. p .. ' failed: ' .. E.show(op), 2) end
+    -- The Forward result opens the panel in the form's place. The hub refuses a palette command
+    -- in that place until the panel's renderer is attached (409 conflict), so wait for the panel.
+    T.panel(pane.session)
     return E.wait('the tunnel block of ' .. p, function()
       for _, b in ipairs(T.tunnel_blocks(pane.session)) do if not before[b.block_id] then return b.block_id end end
     end, 15)
