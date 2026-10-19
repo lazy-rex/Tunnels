@@ -203,9 +203,21 @@ local cleanup_errors = {} -- profile -> the last failure, shown in the panel
 local cleanup_seq = 0
 local down_prefix = 'lazyrex-tunnel-down:'
 local maintain
+-- receipt answers the exit code of `down` when the screen of block_id has the exact receipt line of
+-- attempt key, else nil.
+local function receipt(block_id, key)
+  local screen = rex.call('com.superlogical.terminal.format', {session_id = plugin_session, block_id = block_id, args = {format = 'text', trim = true, unwrap = true}})
+  if not screen or type(screen.content) ~= 'string' or type(key) ~= 'string' then return nil end
+  local want = 'lazyrex-tunnel-down-exit ' .. key .. ' '
+  for line in (screen.content .. '\n'):gmatch('([^\n]*)\n') do
+    line = line:gsub('%s+$', '')
+    if line:sub(1, #want) == want and line:sub(#want + 1):match('^%d+$') then return tonumber(line:sub(#want + 1)) end
+  end
+end
 -- advance_cleanups moves each cleanup one step: new -> sending (saved before session.new_block) ->
--- running (block known) -> done (exit 0: the record is removed) or retry (after 5 s). A running block
--- that disappears is retried: its process ended with the block. A sending record with an unknown
+-- running (block known) -> closing (the result is saved; the block closes) -> done (exit 0: the
+-- record is removed) or retry (after 5 s). A running block that disappears is retried: its process
+-- ended with the block. A sending record with an unknown
 -- create result is adopted only with process proof, as for intents. It answers whether work remains.
 local function set_cleanup(profile, f)
   update(function(s) if s.cleanups[profile] then f(s.cleanups[profile]) end end)
@@ -222,17 +234,45 @@ local function advance_cleanups()
       if by_id and not block then
         set_cleanup(profile, function(x) x.phase, x.block_id, x.retry_at = 'retry', nil, now end)
       elseif block then
-        local process = rex.call('com.superlogical.terminal.process', {session_id = plugin_session, block_id = c.block_id, args = {}})
-        if process and not process.child and process.last_exit then
-          pcall(rex.call, 'block.close', {session_id = plugin_session, block_id = c.block_id})
-          if process.last_exit.exit_code == 0 then
-            cleanup_errors[profile] = nil
-            update(function(s) s.cleanups[profile] = nil end)
-            invalidate()
-          else
-            cleanup_errors[profile] = process.last_exit.error or ('exit code ' .. tostring(process.last_exit.exit_code))
-            set_cleanup(profile, function(x) x.phase, x.block_id, x.retry_at = 'retry', nil, now + 5 end)
-          end
+        -- tunnels-down.sh prints a receipt with the key and the exit code of `down` and waits, so
+        -- that an attempt stays provable until it is adopted. A process that ended without a
+        -- receipt was stopped: that attempt is over, and down runs again.
+        local code = receipt(c.block_id, c.key)
+        local process = not code and rex.call('com.superlogical.terminal.process', {session_id = plugin_session, block_id = c.block_id, args = {}})
+        if code then
+          c.result = code == 0 and {ok = true} or {error = 'exit status ' .. code}
+        elseif process and not process.child and process.last_exit then
+          c.result = {error = 'stopped before its result: ' .. tostring(process.last_exit.error or process.last_exit.exit_code)}
+        end
+        if c.result then
+          local result, saved = c.result, false
+          update(function(s)
+            local x = s.cleanups[profile]
+            saved = type(x) == 'table' and x.phase == 'running' and x.block_id == c.block_id
+            if saved then x.phase, x.result = 'closing', result end
+          end)
+          if saved then c.phase = 'closing' end
+        end
+      end
+    end
+    if c.phase == 'closing' then
+      -- The result is saved before block.close, because the close ends a live wrapper. The record
+      -- keeps the block until the close succeeds or a Rex listing shows that the block is gone.
+      local gone = by_id and not by_id[c.block_id]
+      if not gone and by_id then
+        local ok, closed, err = pcall(rex.call, 'block.close', {session_id = plugin_session, block_id = c.block_id})
+        gone = ok and closed ~= nil
+        if not gone then cleanup_errors[profile] = 'the cleanup block did not close: ' .. tostring(ok and err or closed) end
+      end
+      if gone then
+        local result = type(c.result) == 'table' and c.result or {error = 'unknown result'}
+        if result.ok then
+          cleanup_errors[profile] = nil
+          update(function(s) if s.cleanups[profile] and s.cleanups[profile].block_id == c.block_id then s.cleanups[profile] = nil end end)
+          invalidate()
+        else
+          cleanup_errors[profile] = result.error
+          set_cleanup(profile, function(x) if x.block_id == c.block_id then x.phase, x.block_id, x.result, x.retry_at = 'retry', nil, nil, now + 5 end end)
         end
       end
     elseif c.phase == 'sending' then
@@ -246,7 +286,7 @@ local function advance_cleanups()
       else
         cleanup_seq = cleanup_seq + 1
         local key = instance_id .. '-' .. now .. '-' .. cleanup_seq
-        set_cleanup(profile, function(x) x.phase, x.key, x.saved_at, x.block_id = 'sending', key, now, nil end)
+        set_cleanup(profile, function(x) x.phase, x.key, x.saved_at, x.block_id, x.result = 'sending', key, now, nil, nil end)
         local created = rex.call('session.new_block', {session_id = plugin_session, flavor = 'com.superlogical.terminal.shell',
           label = down_prefix .. key, options = {command = {'/bin/sh', plugin_dir .. '/tunnels-down.sh', key, opentunnel, profile},
           login = false, exit = {on_completion = false}}})

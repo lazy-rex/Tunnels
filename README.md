@@ -25,6 +25,22 @@ The hub gives agents these actions (MCP tools):
 
 Forward Port… has no agent action yet: an agent that publishes a local port waits for a decision.
 
+## Cleanup
+
+When a forward ends, the plugin runs `opentunnel down` for its profile in a detached block of the
+plugin session (`tunnels-down.sh`). Forward refuses the port until that cleanup ends with exit 0.
+
+- The script prints the receipt line `lazyrex-tunnel-down-exit <key> <code>` and then waits. So the
+  plugin can prove the attempt with ps (label, key in argv, start time), also after a lost create
+  reply or a lost write.
+- The plugin saves the result, then closes the block. A failed close keeps the record and the block
+  until a close succeeds or a Rex listing shows that the block is gone.
+- An attempt that ends without a receipt after the plugin adopted it runs again.
+- An attempt that something else stops before the plugin adopts it cannot be proven. A block with only
+  its label is no proof, because the original create can still arrive. Its profile stays reserved,
+  and the user must recover it: remove the cleanup record, after a check that no `down` of that
+  profile still runs.
+
 ## Tests
 
 Run the tests with `lazyrex-hub test` in this directory (LazyRex `docs/testing.md`). The command

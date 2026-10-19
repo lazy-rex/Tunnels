@@ -5,15 +5,16 @@
 --     catalog = <forwards record value>, rex = {[method] = function(args) return result, err end}})
 -- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
 -- catalog, and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
+-- s:tick() runs the timers that the plugin set.
 return function(plugin_dir, base, opts)
   opts = opts or {}
   local vars, executables, overrides = opts.vars or {}, opts.executables or {}, opts.rex or {}
   local catalog = opts.catalog or {}
-  local s = {handlers = {}, creates = {}, execs = {}, catalog = catalog}
+  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = catalog}
   local stub = {
     args = {hub_client_id = 'hub', instance_id = 'instance', plugin_session = 'plugin'},
     on = function(name, fn) s.handlers[name] = fn end,
-    after = function() end, -- No timer runs: maintenance stays off.
+    after = function(_, fn) s.timers[#s.timers + 1] = fn end, -- A timer runs only on s:tick().
     exec = function(argv)
       s.execs[#s.execs + 1] = argv
       if argv[1] == '/bin/test' and argv[2] == '-x' then return {ok = executables[argv[3]] == true} end
@@ -42,6 +43,12 @@ return function(plugin_dir, base, opts)
     self.reply = nil
     self.handlers.client_perform_requested({}, {requester = {client_id = 'hub'}, action = action, call_id = 'c', args = args})
     return self.reply
+  end
+  -- tick runs the timers that are due now (maintenance, kicks), once each.
+  function s:tick()
+    local due = self.timers
+    self.timers = {}
+    for _, fn in ipairs(due) do fn() end
   end
   return s
 end

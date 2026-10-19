@@ -124,3 +124,158 @@ test('a cleanup with an unknown create result keeps its port across a restart an
   rex.call('block.close', {session_id = S, block_id = b})
   T.no_cleanup_for(p)
 end)
+
+-- plugin_session answers the session where the plugin runs its cleanup blocks: the LazyRex session
+-- that the hub owns.
+local function plugin_session()
+  for _, s in ipairs(rex.call('session.list', {}).sessions or {}) do if s.label == 'LazyRex' then return s.session_id end end
+  error('no LazyRex session in the lab', 0)
+end
+
+local function process_of(session_id, block_id)
+  return rex.call('com.superlogical.terminal.process', {session_id = session_id, block_id = block_id, args = {}})
+end
+
+test('an exited block with the label of a cleanup attempt is no proof: the profile stays reserved', function()
+  -- The original create of attempt key can still be outstanding (a late Rex reply). A block that
+  -- only has its label and has exited may be unrelated, so it must not release the profile.
+  local p = T.port()
+  local profile = T.prefix .. p
+  local P = plugin_session()
+  local key = 'unrelated-' .. p
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/usr/bin/true'})
+  wait('the unrelated block exited', function() local r = process_of(P, b); return r and not r.child and r.last_exit end, 10)
+  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  T.open_panel(pane) -- a render kicks maintenance; it runs every second while a cleanup exists
+  rex.sleep(4)
+  local c = T.catalog().cleanups[profile]
+  expect(c.phase).to_be('sending')
+  expect(c.key).to_be(key)
+  expect(T.down_calls(p)).to_be(0)
+  local op = T.submit(T.open_form(pane), p)
+  expect(op.status).to_be('failed')
+  expect(op.error.message).to_match('still stopping its previous tunnel')
+  save(function(v) v.cleanups[profile] = nil end)
+  rex.call('block.close', {session_id = P, block_id = b})
+end)
+
+test('a cleanup attempt whose running write was lost is proven and finished, after its down ran', function()
+  -- Lab evidence (reviewer lab /tmp/lrt-3109559289): the record stayed 'sending' after the down of
+  -- its attempt ran, because the down process had exited and no proof was possible. The run script
+  -- now waits after down with a receipt, so the attempt stays provable.
+  local p = T.port()
+  local profile = T.prefix .. p
+  local P = plugin_session()
+  local key = 'lost-running-' .. p
+  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  -- The block of the attempt, as session.new_block made it before its reply was lost.
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  wait('down ran', function() return T.down_calls(p) == 1 end, 10)
+  T.open_panel(pane) -- a render kicks maintenance
+  T.no_cleanup_for(p)
+  expect(T.down_calls(p), 'down ran once').to_be(1)
+  wait('the plugin closes the attempt block', function() return T.blocks(P)[b] == nil end, 10)
+end)
+
+test('a completed attempt that is still sending at a plugin restart is proven and finished', function()
+  -- The plugin is stopped while the attempt runs, so the record is still 'sending' when it starts.
+  local p = T.port()
+  local profile = T.prefix .. p
+  local P = plugin_session()
+  local key = 'restart-sending-' .. p
+  H.hub('hub.admin.stop', {plugin = 'tunnels'})
+  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  wait('down ran', function() return T.down_calls(p) == 1 end, 10)
+  expect(T.catalog().cleanups[profile].phase).to_be('sending')
+  H.hub('hub.admin.start', {plugin = 'tunnels'})
+  wait('the plugin answers again', function() return pcall(T.list, alice) end, 20)
+  T.no_cleanup_for(p)
+  expect(T.down_calls(p), 'down ran once').to_be(1)
+  wait('the plugin closes the attempt block', function() return T.blocks(P)[b] == nil end, 10)
+end)
+
+test('an adopted attempt that is killed before its receipt runs down again', function()
+  local p = T.port()
+  local profile = T.prefix .. p
+  local P = plugin_session()
+  local key = 'killed-' .. p
+  T.flag('slow-down', true)
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  wait('down runs', function() return T.down_calls(p) == 1 end, 10)
+  save(function(v) v.cleanups[profile] = {phase = 'running', key = key, saved_at = os.time() - 1, block_id = b} end)
+  T.flag('slow-down', false)
+  -- Kill the wrapper and its down (one process group) before the receipt. The test made this
+  -- block, and checks that the PID runs its attempt.
+  local pid = tonumber(process_of(P, b).child.pid)
+  local ps = rex.exec({'/bin/ps', '-o', 'command=', '-p', tostring(pid)}, {timeout = 3})
+  assert_true(ps and ps.ok and ps.stdout:find(key, 1, true), 'the PID runs the attempt')
+  rex.exec({'/bin/kill', '-KILL', '--', '-' .. pid}, {timeout = 3})
+  T.open_panel(pane) -- a render kicks maintenance
+  -- The attempt is over without a result: the record retries with a new attempt, which finishes.
+  wait('a retry', function() local c = T.catalog().cleanups[profile]; return not c or c.key ~= key end, 15)
+  T.no_cleanup_for(p)
+  expect(T.down_calls(p), 'down ran again').to_be(2)
+  wait('the plugin closes the killed block', function() return T.blocks(P)[b] == nil end, 10)
+end)
+
+-- The receipt and the close (sandbox): the stub Rex can refuse block.close, which the lab cannot.
+local load_sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
+local base = getfenv(1)
+local function cleanup_sandbox(screen, closes)
+  local state = {closes = 0, listed = true}
+  local s = load_sandbox(T.plugin_dir, base, {
+    vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
+    catalog = {cleanups = {['lazyrexlab-4321'] = {phase = 'running', key = 'k1', saved_at = 0, block_id = 'd'}}},
+    rex = {
+      ['session.list'] = function() return {sessions = {{session_id = 'plugin'}}} end,
+      ['session.list_blocks'] = function() return {blocks = state.listed and {{block_id = 'd', placement = 'detached'}} or {}} end,
+      ['com.superlogical.terminal.format'] = function() return {content = screen} end,
+      ['com.superlogical.terminal.process'] = function() return {child = {pid = 1}} end,
+      ['block.close'] = function()
+        state.closes = state.closes + 1
+        local answer = closes[state.closes]
+        if answer then return {} end
+        return nil, 'stream response "control-15" failed: refused (status=500 code=internal)'
+      end,
+    }})
+  assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
+  return s, state
+end
+local function cleanup_of(s) return (s.catalog.cleanups or {})['lazyrexlab-4321'] end
+
+test('a failed close keeps the cleanup and its block; the next close finishes it (sandbox)', function()
+  local s, state = cleanup_sandbox('Disconnected profile lazyrexlab-4321.\n\nlazyrex-tunnel-down-exit k1 0', {false, true})
+  s:tick()
+  expect(state.closes).to_be(1)
+  local c = cleanup_of(s)
+  expect(c.phase).to_be('closing')
+  expect(c.block_id).to_be('d')
+  expect(c.result).to_equal({ok = true})
+  s:tick()
+  expect(state.closes).to_be(2)
+  expect(cleanup_of(s)).to_be(nil)
+  expect(#s.creates, 'no new down').to_be(0)
+end)
+
+test('after a failed close, a listing without the block finishes the cleanup (sandbox)', function()
+  local s, state = cleanup_sandbox('lazyrex-tunnel-down-exit k1 1', {false})
+  s:tick()
+  expect(cleanup_of(s).phase).to_be('closing')
+  expect(cleanup_of(s).result).to_equal({error = 'exit status 1'})
+  state.listed = false
+  s:tick()
+  expect(state.closes, 'no close of an absent block').to_be(1)
+  local c = cleanup_of(s)
+  expect(c.phase).to_be('retry')
+  expect(c.block_id).to_be(nil)
+end)
+
+test('only the exact receipt line of the attempt counts (sandbox)', function()
+  local screen = table.concat({'lazyrex-tunnel-down-exit other 0', 'xlazyrex-tunnel-down-exit k1 0',
+    'lazyrex-tunnel-down-exit k1 0 more', 'lazyrex-tunnel-down-exit k10 0', 'output lazyrex-tunnel-down-exit k1 0'}, '\n')
+  local s, state = cleanup_sandbox(screen, {true})
+  s:tick()
+  expect(state.closes).to_be(0)
+  expect(cleanup_of(s).phase).to_be('running')
+end)
