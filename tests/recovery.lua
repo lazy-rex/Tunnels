@@ -100,16 +100,22 @@ test('a cleanup with an unknown create result keeps its port across a restart an
   local p = T.port()
   local profile = T.prefix .. p
   save(function(v) v.cleanups[profile] = {phase = 'sending', key = 'unknown-down', saved_at = os.time()} end)
-  T.open_panel(pane)
+  T.open_panel(pane) -- a render kicks maintenance
+  rex.sleep(2)
   local op = T.submit(T.open_form(pane), p)
   expect(op.status).to_be('failed')
   expect(op.error.message).to_match('still stopping its previous tunnel')
   expect(#T.tunnel_blocks(S)).to_be(0)
+  -- No down starts for an unknown create: no cleanup block, no down call.
+  expect(#T.down_blocks()).to_be(0)
+  expect(T.down_calls(p)).to_be(0)
   T.restart()
   rex.sleep(3)
   local c = T.catalog().cleanups[profile]
   expect(c.phase).to_be('sending')
   expect(c.key).to_be('unknown-down')
+  expect(#T.down_blocks()).to_be(0)
+  expect(T.down_calls(p)).to_be(0)
   op = T.submit(T.open_form(pane), p)
   expect(op.status).to_be('failed')
   -- A cleanup that Rex shows as running with exit 0 releases the profile (lifecycle.lua runs the real path).

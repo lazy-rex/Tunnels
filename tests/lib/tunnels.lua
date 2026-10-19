@@ -25,6 +25,18 @@ return function(E, tests_dir)
     local ok, r = sh('grep -cx ' .. q(T.prefix .. p .. ' down') .. ' ' .. q(T.fake .. '/calls.log') .. ' || true')
     return tonumber((r and r.stdout or ''):match('%d+')) or 0
   end
+  -- down_blocks answers the cleanup blocks (label lazyrex-tunnel-down:) in every session.
+  function T.down_blocks()
+    local list = {}
+    for _, s in ipairs(rex.call('session.list', {}).sessions or {}) do
+      pcall(rex.call, 'session.attach', {session_id = s.session_id, event_scope = 'session'})
+      local r = rex.call('session.list_blocks', {session_id = s.session_id})
+      for _, b in ipairs(r and r.blocks or {}) do
+        if (b.label or ''):sub(1, 20) == 'lazyrex-tunnel-down:' then list[#list + 1] = b end
+      end
+    end
+    return list
+  end
   function T.catalog() return E.store('forwards').value or {} end
   function T.cleanups() local c = {}; for profile in pairs(T.catalog().cleanups or {}) do c[#c + 1] = profile end; table.sort(c); return c end
   function T.blocks(session)

@@ -13,18 +13,7 @@ local pane = T.shell(S, 'work')
 local function reset() for _, name in ipairs({'fail-up', 'slow-up', 'fail-serve', 'fail-down', 'slow-down'}) do T.flag(name, false) end end
 reset()
 
--- down_blocks answers the cleanup blocks (label lazyrex-tunnel-down:) in every session.
-local function down_blocks()
-  local list = {}
-  for _, s in ipairs(rex.call('session.list', {}).sessions or {}) do
-    pcall(rex.call, 'session.attach', {session_id = s.session_id, event_scope = 'session'})
-    local r = rex.call('session.list_blocks', {session_id = s.session_id})
-    for _, b in ipairs(r and r.blocks or {}) do
-      if (b.label or ''):sub(1, 20) == 'lazyrex-tunnel-down:' then list[#list + 1] = b end
-    end
-  end
-  return list
-end
+local down_blocks = T.down_blocks
 local function state_of(p) local f = T.forward_of(p, alice); return f and f.state end
 
 test('a failed up leaves no service; the panel and the list show Failed', function()
