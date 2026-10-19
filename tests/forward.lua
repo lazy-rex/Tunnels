@@ -1,6 +1,7 @@
 -- Forward on the view path, and what tunnels.list reports for it. Ported from tests/tunnels-lab.mjs
--- (fake opentunnel). Forward Port… has no agent action until the user decides; the other flows
--- run on both paths: tunnels.list (tool) and the panel (view). The real-opentunnel run is excluded.
+-- (fake opentunnel). agent-forward.lua tests the agent path (tunnels.forward) of the same handler;
+-- the other flows run on both paths: tunnels.list (tool) and the panel (view). The real-opentunnel
+-- run is excluded.
 
 local tests_dir = debug.getinfo(1, 'S').source:match('^@?(.*)/[^/]*$')
 dofile(tests_dir .. '/lib/guard.lua')(tests_dir)

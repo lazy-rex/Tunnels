@@ -8,7 +8,7 @@
 -- the create is sent once. The forward, the intent removal and the operation result commit in one
 -- batch. A label is only a discovery hint (architecture.md). An intent with an unknown create
 -- result is adopted only with process proof: exactly one block in its session has the label
--- lazyrex-tunnel:<op key>, its process argv carries the op key, and the process started after the
+-- lazyrex-tunnel:<op key> (label_of: a digest for an agent key), its process argv carries the op key, and the process started after the
 -- intent was saved. Otherwise the panel shows it as unknown, and it keeps its port until it is proven
 -- or its session closes. A block or session that is absent from a successful Rex listing means a
 -- stopped tunnel.
@@ -31,6 +31,20 @@ local default_prefix = 'lazyrex-'
 local profile_prefix = os.getenv('LAZYREX_TUNNELS_PROFILE_PREFIX') or default_prefix
 assert(profile_prefix:match('^[%w_][%w_%-]*%-$'), 'LAZYREX_TUNNELS_PROFILE_PREFIX must be letters, digits, _ or - and end with -')
 local label_prefix = 'lazyrex-tunnel:'
+-- label_of answers the block label of Forward operation id. Rex refuses a label over 128
+-- characters (bad_request, Rex 0.0.1792158932-g88fd41). A user ID (at most 100 characters) is in
+-- the label as before. An agent ID (fwd/...) can be longer, so its label has a 64-bit digest of the
+-- ID. A label is only a discovery hint: the proof is the full ID in the process argv (proven()).
+local function label_of(id)
+  if id:sub(1, 4) ~= 'fwd/' then return label_prefix .. id end
+  local a, b = 0, 0
+  for i = 1, #id do
+    local c = id:byte(i)
+    a = (a * 31 + c) % 4294967296
+    b = (b * 131 + c) % 4294967291
+  end
+  return label_prefix .. string.format('fwd-%08x%08x', a, b)
+end
 local function executable(path) local r = rex.exec({'/bin/test', '-x', path}, {timeout = 5}); return r and r.ok end
 -- find_opentunnel answers the binary, or nil and the reason. A configured binary must be an absolute
 -- executable path. A lab prefix uses only the stand-in of this checkout, plugin_dir/tests/fake-opentunnel.sh,
@@ -186,13 +200,21 @@ local function proven(by_id, label, key, saved_at, session_id, script)
 end
 
 local done_result = {panel = {command = 'tunnels'}}
+-- result_for answers the Forward result for the creator of intent: the view result for the user,
+-- the forward for an agent. Maintenance that adopts an intent saves the same result.
+local function result_for(intent, block_id)
+  if type(intent.creator) == 'table' and intent.creator.kind == 'agent' then
+    return {forward = block_id, port = intent.port, target = intent.target, session_id = intent.session_id, source_block = intent.source_block, state = 'starting'}
+  end
+  return done_result
+end
 -- commit turns intent id into the forward of block_id, with the operation result, in one batch.
 local function commit(id, intent, block_id)
   update(function(s)
     s.intents[id] = nil
     s.forwards[block_id] = {session_id = intent.session_id, source_block = intent.source_block, port = intent.port,
       target = intent.target, profile = intent.profile, op = id, created = intent.created, creator = intent.creator}
-  end, {key = id, fingerprint = intent.fingerprint, result = done_result})
+  end, {key = id, fingerprint = intent.fingerprint, result = result_for(intent, block_id)})
 end
 -- drop removes intent id and records the operation result, so a retry never creates again.
 local function drop(id, intent, result)
@@ -312,7 +334,7 @@ local function reconcile()
   local rows, gone, urls = {}, {}, {}
   for id, intent in pairs(state.intents) do
     local by_id = blocks(intent.session_id)
-    local block = by_id and proven(by_id, label_prefix .. id, id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
+    local block = by_id and proven(by_id, label_of(id), id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
     if not by_id then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}})
     elseif block then
       commit(id, intent, block.block_id)
@@ -473,47 +495,55 @@ local function stop_forward(caller, block_id, key)
   return result
 end
 
-local function forward(args)
-  local id = args.operation_key
-  if type(id) ~= 'string' or not id:match('^[%w%-_%.:]+$') or #id > 100 then fail('invalid_input', 'Invalid operation key') end
-  local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
-  local ctx = type(args.context) == 'table' and args.context or {}
-  local choice = type(values.port) == 'string' and values.port or ''
-  local other = type(values.other) == 'string' and values.other or ''
-  local fingerprint = 'forward/' .. #choice .. ':' .. choice .. '/' .. #other .. ':' .. other .. '/' .. tostring(ctx.session_id)
+-- enc writes every byte outside [A-Za-z0-9-] as '_' and two hex digits, so an agent ID and key fit
+-- a Rex label and the ps proof (no space or quote).
+local function enc(value) return (tostring(value):gsub('[^%w%-]', function(c) return string.format('_%02x', c:byte()) end)) end
+-- source_of answers the form option value of a listener; tunnels.ports gives it as source.
+local function source_of(p) return p.session_id .. '|' .. (p.block_id or '') .. '|' .. tostring(p.port) .. '|' .. (p.address or '') end
+-- from_source answers the request of a listener choice (the form option value or the agent source).
+local function from_source(choice)
+  local session_id, block_id, port, address = choice:match('^([^|]+)|([^|]*)|(%d+)|(.*)$')
+  if not session_id then fail('invalid_input', 'Select a port') end
+  port = valid_port(port)
+  return {session_id = session_id, source_block = block_id ~= '' and block_id or nil, port = port, target = target(address, port)}
+end
+local function fingerprint_matches(stored, req)
+  return stored == req.fingerprint or (req.legacy ~= nil and stored == req.legacy)
+end
+
+-- start_forward runs one Forward request for the view and the agent path. req = {id, fingerprint,
+-- legacy (view only: the v1 fingerprint of records saved before forward-v2), creator, resolve =
+-- function answering {session_id, source_block, port, target}}.
+-- The replay lookup comes first: a saved result or intent never depends on the current scan.
+local function start_forward(req)
+  local id = req.id
   local saved = hub('hub.store.op', {key = id})
-  if saved.found then return result_of(saved, fingerprint) end
+  if saved.found then
+    if not fingerprint_matches(saved.fingerprint, req) then fail('operation_conflict', 'This key has different content') end
+    if type(saved.result) == 'table' and saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
+    return saved.result
+  end
   local state = catalog()
   local intent = state.intents[id]
   if intent then
-    if intent.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+    if not fingerprint_matches(intent.fingerprint, req) then fail('operation_conflict', 'This key has different content') end
     -- Sent before with an unknown result: never send it again. Look for its block.
     local by_id = blocks_of(intent.session_id, sessions())
     if not by_id then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}}); fail('not_found', 'The session closed before the tunnel started') end
-    local block = proven(by_id, label_prefix .. id, id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
+    local block = proven(by_id, label_of(id), id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
     if not block then fail('unresolved', 'The tunnel block has an unknown start result; a late Rex reply can still create it') end
     commit(id, intent, block.block_id)
     invalidate()
-    return done_result
+    return result_for(intent, block.block_id)
   end
-  if choice ~= '' and choice ~= 'other' then
-    local session_id, block_id, port, address = choice:match('^([^|]+)|([^|]*)|(%d+)|(.*)$')
-    if not session_id then fail('invalid_input', 'Select a port') end
-    port = valid_port(port)
-    intent = {session_id = session_id, source_block = block_id ~= '' and block_id or nil, port = port, target = target(address, port)}
-  else
-    if type(ctx.session_id) ~= 'string' or ctx.session_id == '' then fail('invalid_input', 'The form has no session') end
-    local port = valid_port(other)
-    -- "Other port…" has no process: the source is the pane that ran the palette command.
-    intent = {session_id = ctx.session_id, source_block = ctx.source_block_id ~= '' and ctx.source_block_id or nil, port = port, target = '127.0.0.1:' .. port}
-  end
+  intent = req.resolve()
   if not sessions()[intent.session_id] then fail('not_found', 'The session of this port is closed') end
   -- Check the binary before the intent is saved: a request that is never sent must not hold a port.
   local opentunnel, why = find_opentunnel()
   if not opentunnel then fail('not_found', why) end
   intent.profile = profile_prefix .. intent.port
-  intent.creator = {kind = 'user'}
-  intent.fingerprint = fingerprint
+  intent.creator = req.creator
+  intent.fingerprint = req.fingerprint
   intent.created = os.date('!%Y-%m-%dT%H:%M:%SZ')
   intent.saved_at = os.time()
   intent.phase = 'sending'
@@ -536,7 +566,7 @@ local function forward(args)
   end)
   local command = {'/bin/sh', plugin_dir .. '/tunnels-run.sh', id, opentunnel, intent.profile, intent.target}
   local created, err = rex.call('session.new_block', {session_id = intent.session_id, flavor = 'com.superlogical.terminal.shell',
-    label = label_prefix .. id, options = {command = command, login = false, exit = {on_completion = false}}})
+    label = label_of(id), options = {command = command, login = false, exit = {on_completion = false}}})
   if not (created and created.block_id) then
     local _, e = pcall(function()
       if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Rex request failed') end
@@ -556,7 +586,74 @@ local function forward(args)
   commit(id, intent, created.block_id)
   invalidate()
   kick()
-  return done_result
+  return result_for(intent, created.block_id)
+end
+
+-- forward is the form submit (view path). Its key is the hub operation key, as before forward-v2.
+local function forward(args)
+  local id = args.operation_key
+  if type(id) ~= 'string' or not id:match('^[%w%-_%.:]+$') or #id > 100 then fail('invalid_input', 'Invalid operation key') end
+  local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
+  local ctx = type(args.context) == 'table' and args.context or {}
+  local choice = type(values.port) == 'string' and values.port or ''
+  local other = type(values.other) == 'string' and values.other or ''
+  local ctx_session = type(ctx.session_id) == 'string' and ctx.session_id or ''
+  local ctx_source = type(ctx.source_block_id) == 'string' and ctx.source_block_id or ''
+  local scan_mode = choice ~= '' and choice ~= 'other'
+  return start_forward({
+    id = id,
+    fingerprint = 'forward-v2/' .. (scan_mode and part('scan') .. part(choice) or part('other') .. part(ctx_session) .. part(ctx_source) .. part(other)),
+    legacy = 'forward/' .. #choice .. ':' .. choice .. '/' .. #other .. ':' .. other .. '/' .. tostring(ctx.session_id),
+    creator = {kind = 'user'},
+    resolve = function()
+      if scan_mode then return from_source(choice) end
+      if ctx_session == '' then fail('invalid_input', 'The form has no session') end
+      local port = valid_port(other)
+      -- "Other port…" has no process: the source is the pane that ran the palette command.
+      return {session_id = ctx_session, source_block = ctx_source ~= '' and ctx_source or nil, port = port, target = '127.0.0.1:' .. port}
+    end,
+  })
+end
+
+-- agent_forward is tunnels.forward (agent path). caller is the agent; session_id and block_id are
+-- its pane from hub.identify, the defaults of the manual port form.
+local function agent_forward(caller, own_session, own_block, args)
+  local key = args.key
+  if type(key) ~= 'string' or key == '' or #key > 100 then fail('invalid_input', 'key is required (1 to 100 characters)') end
+  local has_source, has_port = args.source ~= nil, args.port ~= nil
+  if has_source == has_port then fail('invalid_input', 'Give either source (from tunnels.ports) or port') end
+  if has_source and (args.session_id ~= nil or args.block_id ~= nil) then fail('invalid_input', 'source names its session and pane; do not give session_id or block_id with it') end
+  local id = 'fwd/' .. part(enc(caller.agent)) .. part(enc(key))
+  if #id > 600 then fail('invalid_input', 'The agent ID and key are too long') end
+  local fingerprint
+  if has_source then
+    if type(args.source) ~= 'string' or args.source == '' then fail('invalid_input', 'source must be a source from tunnels.ports') end
+    fingerprint = 'forward-agent-v1/' .. part('source') .. part(args.source)
+  else
+    if type(args.port) ~= 'number' then fail('invalid_input', 'port must be a whole number from 1 to 65535') end
+    for _, name in ipairs({'session_id', 'block_id'}) do
+      if args[name] ~= nil and (type(args[name]) ~= 'string' or args[name] == '') then fail('invalid_input', name .. ' must be a non-empty string') end
+    end
+    fingerprint = 'forward-agent-v1/' .. part('port') .. part(args.session_id or '') .. part(args.block_id or '') .. part(args.port)
+  end
+  return start_forward({
+    id = id, fingerprint = fingerprint, creator = caller,
+    resolve = function()
+      if has_source then return from_source(args.source) end
+      local port = valid_port(args.port)
+      local session_id = args.session_id or own_session
+      if type(session_id) ~= 'string' or session_id == '' then fail('invalid_input', 'session_id is required: the hub knows no session of this agent') end
+      local by_id = blocks_of(session_id, sessions())
+      if not by_id then fail('not_found', 'The session of this port is closed') end
+      local source_block = args.block_id
+      if source_block then
+        if not by_id[source_block] then fail('not_found', 'block_id is not a pane of that session') end
+      elseif own_block and by_id[own_block] then
+        source_block = own_block
+      end
+      return {session_id = session_id, source_block = source_block, port = port, target = '127.0.0.1:' .. port}
+    end,
+  })
 end
 
 local function panel_action(args)
@@ -593,7 +690,7 @@ local function render_form(args)
   local options = {}
   for _, p in pairs(result.ports or {}) do
     local where = (type(p.tab) == 'string' and p.tab ~= '') and p.tab or 'detached pane'
-    options[#options + 1] = {value = p.session_id .. '|' .. (p.block_id or '') .. '|' .. tostring(p.port) .. '|' .. (p.address or ''),
+    options[#options + 1] = {value = source_of(p),
       label = tostring(p.port) .. ' · ' .. (tostring(p.command or '?'):match('([^/]+)$') or '?') .. ' · ' .. where .. ' · ' .. (p.address or '')
         .. (p.session_id ~= ctx.session_id and ' · other session' or '')}
   end
@@ -606,7 +703,7 @@ local function render_form(args)
   nodes[#nodes + 1] = {id = 'forward', type = 'form', label = 'Forward a port', fields = {
     {id = 'port', label = 'Port', kind = 'select', required = true, value = options[1].value, options = options},
     {id = 'other', label = 'Other port (for "Other port…")', kind = 'text', required = false, value = ''},
-  }, submit_action = {name = 'forward', label = 'Forward', enabled = true, user_only = 'publishes a local port; awaiting decision'}}
+  }, submit_action = {name = 'forward', label = 'Forward', enabled = true, tool = 'tunnels.forward'}}
   nodes[#nodes + 1] = {id = 'rescan', type = 'widget', text = 'The list is from the last scan.', action = {name = 'rescan', label = 'Rescan', enabled = true, tool = 'tunnels.ports'}}
   nodes[#nodes + 1] = {id = 'notice', type = 'widget', text = 'Anyone with the URL can reach the port. The tunnel does not ask visitors to sign in.'}
   return {title = 'Forward Port', nodes = nodes}
@@ -697,7 +794,14 @@ local function ports_for(session_id, args)
   end
   local result = rescan(session_id)
   invalidate()
-  return {session_id = session_id, ports = result.ports or {}, warnings = result.warnings or {}}
+  local ports = {}
+  for i, p in ipairs(result.ports or {}) do
+    local entry = {}
+    for k, v in pairs(p) do entry[k] = v end
+    entry.source = source_of(p)
+    ports[i] = entry
+  end
+  return {session_id = session_id, ports = ports, warnings = result.warnings or {}}
 end
 
 local function render(args)
@@ -725,11 +829,23 @@ local handlers = {
   ['hub.changed'] = function() return {} end,
 }
 -- Agent actions (agent parity). The hub forwards them with the agent's pid; hub.identify names
--- the agent. Forward Port… has no agent action until the user decides (it publishes a port).
+-- the agent and its pane. Agents may forward and stop any port (LazyRex docs/decisions.md, 7cf0851).
 local agent_actions = {
   {name = 'tunnels.list', kind = 'client', title = 'List forwarded ports',
     description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups). Empty lists can appear as {}.',
     args = {type = 'object', properties = {}, additionalProperties = false}},
+  {name = 'tunnels.forward', kind = 'client', title = 'Forward a port to a public URL',
+    description = 'Forward a local TCP port to a public opentunnel URL. The port becomes public: anyone with the URL can reach it, and the tunnel does not ask visitors to sign in. '
+      .. 'Give either source (the source of a listener from tunnels.ports: its session, pane, port and address) or port (the "Other port" form: the target is 127.0.0.1:port). '
+      .. 'With port, session_id defaults to your session and block_id (the source pane) to your pane. Do not give session_id or block_id with source. '
+      .. 'The result names the forward; tunnels.list shows its state and URL once it connects. Choose a key and retry with the same content after an unknown outcome.',
+    args = {type = 'object', properties = {
+      key = {type = 'string', minLength = 1, maxLength = 100},
+      source = {type = 'string', minLength = 1, description = 'A source from tunnels.ports. Not with port, session_id or block_id.'},
+      port = {type = 'integer', minimum = 1, maximum = 65535, description = 'Forward 127.0.0.1:port. Not with source.'},
+      session_id = {type = 'string', minLength = 1, description = 'With port only. Default: your session.'},
+      block_id = {type = 'string', minLength = 1, description = 'With port only: the source pane. Default: your pane.'}},
+      required = {'key'}, additionalProperties = false}},
   {name = 'tunnels.stop', kind = 'client', title = 'Stop a forwarded port',
     description = 'Stop a forward from tunnels.list (forward = its id), also one that the user or another agent started. Choose a key and retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {forward = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
@@ -745,12 +861,13 @@ local function identify(principal)
   if type(principal) ~= 'table' or principal.kind ~= 'peer' or type(principal.pid) ~= 'number' then fail('refused', 'A local requester PID is required') end
   local r = hub('hub.identify', {pid = principal.pid})
   if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
-  return {kind = 'agent', agent = r.agent}, r.session_id
+  return {kind = 'agent', agent = r.agent}, r.session_id, r.block_id
 end
 local function agent_call(name, principal, args)
-  local caller, session_id = identify(principal)
+  local caller, session_id, block_id = identify(principal)
   if type(args) ~= 'table' then fail('invalid_input', 'Arguments must be an object') end
   if name == 'tunnels.list' then return list_tunnels() end
+  if name == 'tunnels.forward' then return agent_forward(caller, session_id, block_id, args) end
   if name == 'tunnels.stop' then return stop_forward(caller, args.forward, args.key) end
   if name == 'tunnels.ports' then return ports_for(session_id, args) end
   fail('not_supported', 'Unknown Tunnels action')
@@ -767,7 +884,7 @@ rex.call('client.keymap', {actions = actions})
 hub('hub.register', {plugin = 'tunnels', instance_id = instance_id, exports = exports, commands = {
   {id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true, user_only = 'navigation'},
   {id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward',
-    user_only = 'publishes a local port; awaiting decision'},
+    action = 'tunnels.forward'},
 }})
 -- A tunnel block that exits or closes, or a closed session, changes the panel.
 rex.on('terminal.child_exited', function() invalidate(); kick() end)

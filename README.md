@@ -18,12 +18,19 @@ The hub gives agents these actions (MCP tools):
 
 - `tunnels.list`: the forwards (state, URL, session, creator, logs shown), the forwards with an
   unknown start result (`pending`), and the opentunnel services that are still stopping (`cleanups`).
+- `tunnels.forward {key, source}` or `tunnels.forward {key, port, session_id?, block_id?}`: the
+  form's Forward. The port becomes public: anyone with the URL can reach it, and the tunnel does not
+  ask visitors to sign in. `source` is the `source` of a listener from `tunnels.ports` (its session,
+  pane, port and address). `port` is the "Other port…" form: the target is `127.0.0.1:<port>`, the
+  session defaults to the agent's session and the source pane to the agent's pane. An agent key has
+  its own namespace, so it never meets a view key or another agent's key. A retry with the same key
+  returns the first result, also after the listener exits.
 - `tunnels.stop {forward, key}`: the panel's Stop. The user and any agent may stop any forward,
   also one that another caller started. A retry with the same key returns the first result.
 - `tunnels.ports {session_id?}`: a new scan of the listening ports, as the form's Rescan. It
   changes only the scan that the form shows, so it takes no key.
 
-Forward Port… has no agent action yet: an agent that publishes a local port waits for a decision.
+Agents may forward and stop any port (LazyRex `docs/decisions.md`, 7cf0851).
 
 ## Cleanup
 

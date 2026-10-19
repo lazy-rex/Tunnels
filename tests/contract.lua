@@ -1,8 +1,9 @@
 -- The plugin contract on the real hub: the exports reach the agent face; only the hub may forward
 -- a call or call view.*; a caller that the hub does not know is refused for every export; a
--- forwarded call is the same as a direct call of the same agent. No test here forwards a port.
+-- forwarded call is the same as a direct call of the same agent. No test here forwards a port:
+-- each refused tunnels.forward stops before the plugin saves anything (agent-forward.lua forwards).
 
-local exports = {'tunnels.list', 'tunnels.stop', 'tunnels.ports'}
+local exports = {'tunnels.list', 'tunnels.forward', 'tunnels.stop', 'tunnels.ports'}
 
 local function client(label)
   local r = rex.call('target.resolve', {kinds = {'client'}, queries = {label}})
@@ -19,7 +20,6 @@ test('the agent face lists every export, and the plugin declares them', function
   local names = {}
   for _, a in ipairs(face.actions) do names[a.name] = true end
   for _, e in ipairs(exports) do expect(names[e], e).to_be(true) end
-  expect(names['tunnels.forward'], 'Forward has no agent action yet').to_be(nil)
   expect(names['view.render'], 'view actions are not exported').to_be(nil)
   local own = {}
   for _, a in ipairs(rex.call('client.inspect', {client_id = plugin}).actions) do own[#own + 1] = a.name end
@@ -28,16 +28,18 @@ test('the agent face lists every export, and the plugin declares them', function
 end)
 
 test('a caller outside every pane is refused for every export', function()
-  local args = {['tunnels.list'] = {}, ['tunnels.stop'] = {forward = 'block:x', key = 'k'}, ['tunnels.ports'] = {}}
+  local args = {['tunnels.list'] = {}, ['tunnels.forward'] = {key = 'k', port = 4000}, ['tunnels.stop'] = {forward = 'block:x', key = 'k'}, ['tunnels.ports'] = {}}
   for _, e in ipairs(exports) do
     expect_error(function() H.perform(plugin, e, args[e]) end, 'does not recognize this agent')
   end
 end)
 
 test('only the hub may call hub.forward or view.*', function()
-  local forged = {action = 'tunnels.list', args = {}, requester_pid = alice.pid}
-  expect_error(function() alice:direct('hub.forward', forged) end, 'Only the hub')
-  expect_error(function() H.perform(plugin, 'hub.forward', forged) end, 'Only the hub')
+  for _, forged in ipairs({{action = 'tunnels.list', args = {}, requester_pid = alice.pid},
+    {action = 'tunnels.forward', args = {key = 'forged', port = 4000}, requester_pid = alice.pid}}) do
+    expect_error(function() alice:direct('hub.forward', forged) end, 'Only the hub')
+    expect_error(function() H.perform(plugin, 'hub.forward', forged) end, 'Only the hub')
+  end
   local stop = {user = 'user', route = '/panels/tunnels', node_id = 'fw/block:x', action = 'stop', input = {item_id = 'stop'}, operation_key = 'forged'}
   expect_error(function() alice:direct('view.action', stop) end, 'Only the hub')
   expect_error(function() H.perform(plugin, 'view.action', stop) end, 'Only the hub')
