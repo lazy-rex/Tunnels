@@ -4,7 +4,7 @@
 -- block owns the tunnel: Stop closes the block, and closing the session ends the tunnel.
 --
 -- State (README, "Tunnels"): one hub.store record "forwards" = {intents = {[op key] = intent},
--- forwards = {[block ID] = forward}, cleanups = {[profile] = true}}. The intent is saved as "sending" before session.new_block, and
+-- forwards = {[block ID] = forward}, cleanups = {[profile] = cleanup}, stops = {[op key] = stop}}. The intent is saved as "sending" before session.new_block, and
 -- the create is sent once. The forward, the intent removal and the operation result commit in one
 -- batch. A label is only a discovery hint (architecture.md). An intent with an unknown create
 -- result is adopted only with process proof: exactly one block in its session has the label
@@ -84,11 +84,18 @@ local function scan(session_id)
   return result
 end
 
+-- rescan drops the cached scan of a session and scans again. The Rescan widget and tunnels.ports
+-- both call it. It changes only this in-memory cache, so it takes no operation key.
+local function rescan(session_id)
+  scans[session_id or ''] = nil
+  return scan(session_id)
+end
+
 local function catalog()
   local r = hub('hub.store.get', {keys = {'forwards'}}).records.forwards
   if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing forward catalog') end
   local value = r.value or {}
-  value.intents, value.forwards, value.cleanups = value.intents or {}, value.forwards or {}, value.cleanups or {}
+  value.intents, value.forwards, value.cleanups, value.stops = value.intents or {}, value.forwards or {}, value.cleanups or {}, value.stops or {}
   return value, r.rev
 end
 -- update applies f to the current catalog and saves it, with the operation result op if given.
@@ -169,7 +176,7 @@ local function commit(id, intent, block_id)
   update(function(s)
     s.intents[id] = nil
     s.forwards[block_id] = {session_id = intent.session_id, source_block = intent.source_block, port = intent.port,
-      target = intent.target, profile = intent.profile, op = id, created = intent.created}
+      target = intent.target, profile = intent.profile, op = id, created = intent.created, creator = intent.creator}
   end, {key = id, fingerprint = intent.fingerprint, result = done_result})
 end
 -- drop removes intent id and records the operation result, so a retry never creates again.
@@ -254,15 +261,19 @@ local function reconcile()
     if not by_id then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}})
     elseif block then
       commit(id, intent, block.block_id)
-      state.forwards[block.block_id] = {session_id = intent.session_id, source_block = intent.source_block, port = intent.port, profile = intent.profile, op = id, created = intent.created}
+      state.forwards[block.block_id] = {session_id = intent.session_id, source_block = intent.source_block, port = intent.port, target = intent.target, profile = intent.profile, op = id, created = intent.created, creator = intent.creator}
     else
       rows[#rows + 1] = {intent_id = id, fw = intent, state = 'Unknown start result'}
     end
   end
+  local stopping = {}
+  for _, st in pairs(state.stops) do stopping[st.forward] = true end
   for block_id, fw in pairs(state.forwards) do
     local by_id = blocks(fw.session_id)
     local block = by_id and by_id[block_id]
-    if not block then gone[block_id] = true
+    -- finish_stops removes a forward that a stop names, with the stop's operation result.
+    if not block and stopping[block_id] then rows[#rows + 1] = {block_id = block_id, fw = fw, url = fw.url, state = 'Stopping'}
+    elseif not block then gone[block_id] = true
     else
       local row = {block_id = block_id, fw = fw, block = block, url = fw.url}
       local process = rex.call('com.superlogical.terminal.process', {session_id = fw.session_id, block_id = block_id, args = {}})
@@ -285,6 +296,7 @@ local function reconcile()
         row.state = 'Failed (' .. (process.last_exit.error or ('exit code ' .. tostring(process.last_exit.exit_code))) .. ')'
       elseif process then row.state = 'Starting'
       else row.state = 'Unknown' end
+      if stopping[block_id] then row.state = 'Stopping' end
       rows[#rows + 1] = row
     end
   end
@@ -302,6 +314,45 @@ local function reconcile()
   return rows
 end
 
+-- Stop (panel Stop and tunnels.stop). A caller is 'user' (the view path) or an agent that the hub
+-- identifies; it never comes from the arguments. The stop is saved before block.close as stops[op
+-- key] = {forward, session_id, fingerprint}, and one final batch removes the forward and the stop
+-- and writes the operation result. A retry with the same key, or maintenance after a failed final
+-- batch or a restart, finishes the same stop, so the key always replays its first result.
+-- part frames a value with its length, so different (caller, key) pairs give different op keys.
+-- A stop op key contains '/', which a Forward key cannot contain, so the two never collide.
+local function part(value) value = tostring(value); return #value .. ':' .. value .. '/' end
+local function stop_key(caller, key)
+  return 'stop/' .. (caller == 'user' and part('user') or part('agent') .. part(caller.agent)) .. part(key)
+end
+-- creator answers the creator of a forward. A missing or malformed creator is the user.
+local function creator(fw)
+  local c = fw.creator
+  if type(c) == 'table' and c.kind == 'agent' and type(c.agent) == 'string' and c.agent ~= '' then return c end
+  return {kind = 'user'}
+end
+-- finish_stop closes the block of a saved stop if Rex lists it, then commits the final batch. It
+-- answers the operation result. A failed Rex read or close raises, and the stop stays saved.
+local function finish_stop(id, st)
+  local fw = catalog().forwards[st.forward]
+  if fw then
+    local by_id = blocks_of(st.session_id, sessions())
+    if by_id and by_id[st.forward] then rex_ok('block.close', {session_id = st.session_id, block_id = st.forward}) end
+  end
+  local result = {forward = st.forward, stopped = true}
+  local saved = update(function(s)
+    local f = s.forwards[st.forward]
+    if f then s.cleanups[f.profile] = s.cleanups[f.profile] or {phase = 'new'}; s.forwards[st.forward] = nil end
+    s.stops[id] = nil
+  end, {key = id, fingerprint = st.fingerprint, result = result})
+  -- Another invocation committed the same final batch first.
+  if saved.op_exists then return saved.op_exists.result end
+  return result
+end
+local function finish_stops()
+  for id, st in pairs(catalog().stops) do pcall(finish_stop, id, st) end
+end
+
 -- Maintenance is owned by the plugin, not by open views: it runs at start, after Rex events and
 -- after Forward and Stop, and again on a timer while work remains: every second while a cleanup
 -- runs or waits, every 10 s while forwards or intents exist (a missed event is found then).
@@ -315,10 +366,11 @@ maintain = function()
   maintaining = true
   local ok, work = pcall(function()
     local state = catalog()
+    if next(state.stops) then finish_stops() end
     if next(state.forwards) or next(state.intents) then reconcile() end
     local cleanup = advance_cleanups()
     state = catalog()
-    return {cleanup = cleanup, live = next(state.forwards) ~= nil or next(state.intents) ~= nil}
+    return {cleanup = cleanup or next(state.stops) ~= nil, live = next(state.forwards) ~= nil or next(state.intents) ~= nil}
   end)
   maintaining = false
   if not ok then schedule(5)
@@ -335,6 +387,36 @@ local function result_of(saved, fingerprint)
   if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
   if type(saved.result) == 'table' and saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
   return saved.result
+end
+
+-- stop_forward stops the forward of block_id for caller. The user may stop any forward; an agent
+-- may stop only a forward that an agent created.
+local function stop_forward(caller, block_id, key)
+  if type(block_id) ~= 'string' or block_id == '' then fail('invalid_input', 'forward is required') end
+  if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
+  local id = stop_key(caller, key)
+  local fingerprint = 'stop-v1/' .. part(block_id)
+  local saved = hub('hub.store.op', {key = id})
+  if saved.found then return result_of(saved, fingerprint) end
+  local state = catalog()
+  local st = state.stops[id]
+  if st then
+    if st.fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+  else
+    local fw = state.forwards[block_id]
+    if not fw then fail('not_found', 'This forward has stopped') end
+    if caller ~= 'user' and creator(fw).kind ~= 'agent' then fail('refused', 'The user started this forward. Only the user can stop it.') end
+    st = {forward = block_id, session_id = fw.session_id, port = fw.port, profile = fw.profile, fingerprint = fingerprint, saved_at = os.time()}
+    update(function(s)
+      if not s.forwards[block_id] then fail('not_found', 'This forward has stopped') end
+      if s.stops[id] and s.stops[id].fingerprint ~= fingerprint then fail('operation_conflict', 'This key has different content') end
+      s.stops[id] = s.stops[id] or st
+    end)
+  end
+  local result = finish_stop(id, st)
+  invalidate()
+  kick()
+  return result
 end
 
 local function forward(args)
@@ -376,6 +458,7 @@ local function forward(args)
   local opentunnel, why = find_opentunnel()
   if not opentunnel then fail('not_found', why) end
   intent.profile = profile_prefix .. intent.port
+  intent.creator = {kind = 'user'}
   intent.fingerprint = fingerprint
   intent.created = os.date('!%Y-%m-%dT%H:%M:%SZ')
   intent.saved_at = os.time()
@@ -389,7 +472,11 @@ local function forward(args)
         if other_fw.port == intent.port then fail('conflict', 'Port ' .. intent.port .. ' is already forwarded. Stop that forward first.') end
       end
     end
-    -- A cleanup can still run `down` for this profile, which would stop the new `serve`.
+    -- A saved stop keeps its port until its final batch: two keys can stop one forward, and each
+    -- finishes on its own. A cleanup can still run `down` for this profile, which would stop the new `serve`.
+    for _, st in pairs(s.stops) do
+      if st.port == intent.port then fail('conflict', 'Port ' .. intent.port .. ' is still stopping its previous tunnel. Try again in a moment.') end
+    end
     if s.cleanups[intent.profile] then fail('conflict', 'Port ' .. intent.port .. ' is still stopping its previous tunnel. Try again in a moment.') end
     s.intents[id] = intent
   end)
@@ -412,16 +499,12 @@ local function panel_action(args)
   local item = input.item_id
   local block_id = type(args.node_id) == 'string' and args.node_id:match('^fw/(.+)$')
   if not block_id then fail('invalid_input', 'Unknown Tunnels action') end
+  if item == 'stop' then return stop_forward('user', block_id, args.operation_key) end
   local fw = catalog().forwards[block_id]
-  -- A repeated Stop after a lost reply finds the forward gone: the stop succeeded.
-  if not fw then if item == 'stop' then return {} end fail('not_found', 'This forward has stopped') end
+  if not fw then fail('not_found', 'This forward has stopped') end
   local by_id = blocks_of(fw.session_id, sessions())
   local block = by_id and by_id[block_id]
-  if item == 'stop' then
-    if block then rex_ok('block.close', {session_id = fw.session_id, block_id = block_id}) end
-    update(function(s) if s.forwards[block_id] then s.cleanups[fw.profile] = s.cleanups[fw.profile] or {phase = 'new'}; s.forwards[block_id] = nil end end)
-    kick()
-  elseif not block then
+  if not block then
     fail('not_found', 'This forward has stopped')
   elseif item == 'show' then
     -- Show and Hide check the placement first, so a repeat after a lost reply changes nothing.
@@ -490,10 +573,14 @@ local function render_panel()
       local name = shown and 'hide' or 'show'
       items[#items + 1] = {id = name, label = shown and 'Hide Logs' or 'Show Logs', detail = '', action = {name = name, label = shown and 'Hide Logs' or 'Show Logs', enabled = true, user_only = 'navigation'}}
       items[#items + 1] = {id = 'stop', label = 'Stop', detail = '', action = {name = 'stop', label = 'Stop', enabled = true, tool = 'tunnels.stop'}}
-    else
+    elseif row.intent_id then
       -- No action: the port stays reserved until Rex proves the block or the session closes.
       node_id = 'intent/' .. row.intent_id
       items[#items + 1] = {id = 'unknown', label = 'Waiting for Rex', detail = 'The tunnel block may still start. The port stays reserved until it does or its session closes.'}
+    else
+      -- A saved stop whose block is gone: maintenance commits its result.
+      node_id = 'fw/' .. row.block_id
+      items[#items + 1] = {id = 'stopping', label = 'Stopping', detail = 'The tunnel block is closed. The port stays reserved until the stop is saved.'}
     end
     if row.state == 'Connected' then running = running + 1 end
     nodes[#nodes + 1] = {id = node_id, type = 'list',
@@ -515,6 +602,39 @@ local function render_panel()
   return {title = running > 0 and ('Tunnels (' .. running .. ' connected)') or 'Tunnels', nodes = nodes}
 end
 
+-- list_tunnels answers what the panel shows, for tunnels.list. It runs the same reconcile.
+local function list_tunnels()
+  local rows = reconcile()
+  local known = sessions()
+  local forwards, pending = {}, {}
+  for _, row in ipairs(rows) do
+    local fw = row.fw
+    if row.intent_id then
+      pending[#pending + 1] = {id = row.intent_id, port = fw.port, target = fw.target, session_id = fw.session_id, state = row.state, created = fw.created}
+    else
+      local c = creator(fw)
+      forwards[#forwards + 1] = {id = row.block_id, port = fw.port, target = fw.target, url = row.url, state = row.state,
+        session_id = fw.session_id, session_label = known[fw.session_id] and known[fw.session_id].label or nil,
+        source_block = fw.source_block, created = fw.created, created_by = c.kind == 'agent' and c.agent or 'user',
+        logs_shown = row.block ~= nil and row.block.placement ~= 'detached'}
+    end
+  end
+  local cleanups = {}
+  for profile in pairs(catalog().cleanups) do cleanups[#cleanups + 1] = {profile = profile, error = cleanup_errors[profile]} end
+  table.sort(cleanups, function(a, b) return a.profile < b.profile end)
+  return {forwards = forwards, pending = pending, cleanups = cleanups}
+end
+
+local function ports_for(session_id, args)
+  if args.session_id ~= nil then
+    if type(args.session_id) ~= 'string' or not sessions()[args.session_id] then fail('invalid_input', 'session_id must name an open session') end
+    session_id = args.session_id
+  end
+  local result = rescan(session_id)
+  invalidate()
+  return {session_id = session_id, ports = result.ports or {}, warnings = result.warnings or {}}
+end
+
 local function render(args)
   if args.route == '/panels/tunnels' then return render_panel() end
   if args.route == '/forms/forward' then return render_form(args) end
@@ -524,7 +644,7 @@ local function perform(args)
   if args.route == '/forms/forward' and args.node_id == 'forward' and args.action == 'forward' then return forward(args) end
   if args.route == '/forms/forward' and args.node_id == 'rescan' then
     local ctx = type(args.context) == 'table' and args.context or {}
-    scans[ctx.session_id or ''] = nil
+    rescan(ctx.session_id)
     invalidate()
     return {}
   end
@@ -539,11 +659,47 @@ local handlers = {
   ['view.seen'] = function() return {} end,
   ['hub.changed'] = function() return {} end,
 }
+-- Agent actions (agent parity). The hub forwards them with the agent's pid; hub.identify names
+-- the agent. Forward Port… has no agent action until the user decides (it publishes a port).
+local agent_actions = {
+  {name = 'tunnels.list', kind = 'client', title = 'List forwarded ports',
+    description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups). Empty lists can appear as {}.',
+    args = {type = 'object', properties = {}, additionalProperties = false}},
+  {name = 'tunnels.stop', kind = 'client', title = 'Stop a forwarded port',
+    description = 'Stop a forward from tunnels.list (forward = its id). An agent can stop only a forward that an agent started. Choose a key and retry with the same content after an unknown outcome.',
+    args = {type = 'object', properties = {forward = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
+      required = {'forward', 'key'}, additionalProperties = false}},
+  {name = 'tunnels.ports', kind = 'client', title = 'Scan listening ports',
+    description = 'Scan the listening TCP ports of processes in Rex panes, with the given session (default: yours) first. It refreshes the scan that the Forward Port form shows and changes nothing else, so it takes no key. Empty lists can appear as {}.',
+    args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
+}
+local exports = {}
+for _, a in ipairs(agent_actions) do exports[#exports + 1] = a.name end
+local function exported(name) for _, e in ipairs(exports) do if e == name then return true end end return false end
+local function identify(principal)
+  if type(principal) ~= 'table' or principal.kind ~= 'peer' or type(principal.pid) ~= 'number' then fail('refused', 'A local requester PID is required') end
+  local r = hub('hub.identify', {pid = principal.pid})
+  if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
+  return {kind = 'agent', agent = r.agent}, r.session_id
+end
+local function agent_call(name, principal, args)
+  local caller, session_id = identify(principal)
+  if type(args) ~= 'table' then fail('invalid_input', 'Arguments must be an object') end
+  if name == 'tunnels.list' then return list_tunnels() end
+  if name == 'tunnels.stop' then return stop_forward(caller, args.forward, args.key) end
+  if name == 'tunnels.ports' then return ports_for(session_id, args) end
+  fail('not_supported', 'Unknown Tunnels action')
+end
 local actions = {}
 for name in pairs(handlers) do actions[#actions + 1] = {name = name, kind = 'client', title = name,
   args = {type = 'object', additionalProperties = true}} end
+for _, a in ipairs(agent_actions) do actions[#actions + 1] = a end
+-- Only the hub can assert the original caller of a forwarded agent action.
+actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward an agent action',
+  args = {type = 'object', properties = {action = {type = 'string'}, args = {type = 'object'}, requester_pid = {type = 'integer'}},
+    required = {'action', 'args', 'requester_pid'}, additionalProperties = false}}
 rex.call('client.keymap', {actions = actions})
-hub('hub.register', {plugin = 'tunnels', instance_id = instance_id, exports = {}, commands = {
+hub('hub.register', {plugin = 'tunnels', instance_id = instance_id, exports = exports, commands = {
   {id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true, user_only = 'navigation'},
   {id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward',
     user_only = 'publishes a local port; awaiting decision'},
@@ -554,9 +710,18 @@ rex.on('block_closed', function() invalidate(); kick() end)
 rex.on('session_closed', function() invalidate(); kick() end)
 rex.on('client_perform_requested', function(ctx, ev)
   local ok, result = pcall(function()
-    if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub calls Tunnels actions') end
+    local from_hub = ev.requester and ev.requester.client_id == hub_id
+    if ev.action == 'hub.forward' then
+      if not from_hub then fail('refused', 'Only the hub forwards agent actions') end
+      local f = ev.args or {}
+      if not exported(f.action) then fail('refused', 'The forwarded action is not exported') end
+      if type(f.requester_pid) ~= 'number' or f.requester_pid <= 0 or f.requester_pid % 1 ~= 0 then fail('invalid_input', 'A positive requester PID is required') end
+      return agent_call(f.action, {kind = 'peer', pid = f.requester_pid}, f.args or {})
+    end
+    if exported(ev.action) then return agent_call(ev.action, ev.requester and ev.requester.principal, ev.args or {}) end
     local handler = handlers[ev.action]
     if not handler then fail('not_supported', 'Unknown Tunnels action') end
+    if not from_hub then fail('refused', 'Only the hub calls Tunnels view actions') end
     local args = ev.args or {}
     if ev.action ~= 'hub.changed' and args.user ~= 'user' then fail('refused', 'Unknown user') end
     return handler(args)

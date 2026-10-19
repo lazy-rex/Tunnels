@@ -9,19 +9,8 @@ local tests_dir = debug.getinfo(1, 'S').source:match('^@?(.*)/[^/]*$')
 local plugin_dir = tests_dir:match('^(.*)/tests$')
 local fixture = plugin_dir .. '/tests/fake-opentunnel.sh'
 
--- under answers whether path is inside dir, at a directory boundary.
-local function under(path, dir)
-  return type(path) == 'string' and path:sub(1, #dir + 1) == dir .. '/' and not path:find('/../', 1, true)
-end
-
 test('the lab forces the fake opentunnel and private paths', function()
-  local lab = (os.getenv('REX_SERVER') or ''):match('^unix://(/.*)/rex%.sock$')
-  assert_true(lab, 'REX_SERVER names a lab socket')
-  expect(os.getenv('LAZYREX_TUNNELS_OPENTUNNEL')).to_be(fixture)
-  expect(os.getenv('LAZYREX_TUNNELS_PROFILE_PREFIX')).to_be('lazyrexlab-')
-  assert_true(under(os.getenv('FAKE_OT_DIR'), lab), 'FAKE_OT_DIR is inside the lab: ' .. tostring(os.getenv('FAKE_OT_DIR')))
-  assert_true(under(os.getenv('XDG_CONFIG_HOME'), lab), 'XDG_CONFIG_HOME is inside the lab: ' .. tostring(os.getenv('XDG_CONFIG_HOME')))
-  assert_true(under(os.getenv('HOME'), lab), 'HOME is inside the lab: ' .. tostring(os.getenv('HOME')))
+  dofile(tests_dir .. '/lib/guard.lua')(tests_dir)
 end)
 
 -- sandbox loads tunnels.lua with the environment vars and the executables given. It answers the

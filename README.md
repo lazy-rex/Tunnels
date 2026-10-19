@@ -12,6 +12,19 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 
 The plugin loads its other files from its own directory, so keep them together.
 
+## Agent actions
+
+The hub gives agents these actions (MCP tools):
+
+- `tunnels.list`: the forwards (state, URL, session, creator, logs shown), the forwards with an
+  unknown start result (`pending`), and the opentunnel services that are still stopping (`cleanups`).
+- `tunnels.stop {forward, key}`: the panel's Stop. The user may stop any forward. An agent may stop
+  only a forward that an agent started. A retry with the same key returns the first result.
+- `tunnels.ports {session_id?}`: a new scan of the listening ports, as the form's Rescan. It
+  changes only the scan that the form shows, so it takes no key.
+
+Forward Port… has no agent action yet: an agent that publishes a local port waits for a decision.
+
 ## Tests
 
 The tests use `../LazyRex` (the client library in `lib/` and the lab harness in `lab/`).
