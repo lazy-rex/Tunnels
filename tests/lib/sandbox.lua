@@ -3,13 +3,13 @@
 --   local sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
 --   local s = sandbox(plugin_dir, base_env, {vars = {...}, executables = {[path] = true},
 --     catalog = <forwards record value>, rex = {[method] = function(args) return result, err end}})
--- It answers the stub state: the event handlers, the last reply, the new_block calls, and loaded /
--- load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
+-- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
+-- catalog, and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
 return function(plugin_dir, base, opts)
   opts = opts or {}
   local vars, executables, overrides = opts.vars or {}, opts.executables or {}, opts.rex or {}
   local catalog = opts.catalog or {}
-  local s = {handlers = {}, creates = {}, execs = {}}
+  local s = {handlers = {}, creates = {}, execs = {}, catalog = catalog}
   local stub = {
     args = {hub_client_id = 'hub', instance_id = 'instance', plugin_session = 'plugin'},
     on = function(name, fn) s.handlers[name] = fn end,
@@ -24,7 +24,7 @@ return function(plugin_dir, base, opts)
       if method == 'client.perform' then
         if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = '1', value = catalog}}}} end
         if args.action == 'hub.store.op' then return {result = {found = false}} end
-        if args.action == 'hub.store.batch' then catalog = args.args.ops[1].value; return {result = {revs = {forwards = '2'}}} end
+        if args.action == 'hub.store.batch' then catalog = args.args.ops[1].value; s.catalog = catalog; return {result = {revs = {forwards = '2'}}} end
         return {result = {}}
       end
       if method == 'session.list' then return {sessions = {{session_id = 's'}}} end

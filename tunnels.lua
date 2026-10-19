@@ -51,24 +51,32 @@ local function find_opentunnel()
   return nil, 'opentunnel is not installed. Install it with: brew install anomalyco/tap/opentunnel'
 end
 
+-- text_error raises a Rex or hub error that Rex Lua gave as text. Observed on Rex
+-- 0.0.1792158932-g88fd41 (lab): the text ends with "(status=<n> code=<code>)". Keep the code: a
+-- refusal is final. Only an error with no code, or with unavailable, disconnected or timeout (a lost
+-- or timed-out call), is unavailable, so the caller retries it.
+local function text_error(err, default)
+  local text = tostring(err or default)
+  local code = text:match('code=([%w_]+)%)$')
+  if not code or code == 'unavailable' or code == 'disconnected' or code == 'timeout' then fail('unavailable', text) end
+  fail(code, text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text)
+end
+
 local function hub(action, args)
   local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
   if type(response) ~= 'table' then
     if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Hub request failed') end
-    -- Observed on Rex 0.0.1792158932-g88fd41 (lab): a hub error arrives as text that ends with
-    -- "(status=<n> code=<code>)". Keep the hub's code: a refusal is final. Only an error with no
-    -- code (a lost or timed-out call) is unavailable, so the hub retries it.
-    local text = tostring(err or 'Hub request failed')
-    local code = text:match('code=([%w_]+)%)$')
-    if not code or code == 'unavailable' or code == 'disconnected' or code == 'timeout' then fail('unavailable', text) end
-    fail(code, text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text)
+    text_error(err, 'Hub request failed')
   end
   if type(response.result) ~= 'table' then fail('internal', 'Invalid hub result') end
   return response.result
 end
 local function rex_ok(method, args)
   local result, err = rex.call(method, args)
-  if not result then fail('unavailable', type(err) == 'table' and err.message or tostring(err)) end
+  if not result then
+    if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Rex request failed') end
+    text_error(err, 'Rex request failed')
+  end
   return result
 end
 local function invalidate() pcall(hub, 'hub.ui.invalidate', {}) end

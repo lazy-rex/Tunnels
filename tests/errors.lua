@@ -58,3 +58,59 @@ test('a refused store write reaches an agent with the hub code', function()
   expect(alice:call('tunnels.stop', {forward = b, key = 'refused'}).stopped).to_be(true)
   T.no_cleanup_for(p)
 end)
+
+-- rex_ok(): a Rex refusal keeps its code too. Rex refuses only on races that the plugin checks
+-- first (a block or anchor that closes between the listing and the call), so these tests run the
+-- plugin in the sandbox (tests/lib/sandbox.lua). The stub returns the error text that Rex
+-- 0.0.1792158932-g88fd41 gave in the lab for the same calls.
+local load_sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
+local base = getfenv(1)
+local function rex_text(message, status, code)
+  return 'stream response "control-15" failed: ' .. message .. (code and (' (status=' .. status .. ' code=' .. code .. ')') or '')
+end
+-- forward_sandbox answers a sandbox with one detached tunnel block t whose source pane src is placed.
+local function forward_sandbox(overrides)
+  overrides['session.list_blocks'] = overrides['session.list_blocks'] or function()
+    return {blocks = {{block_id = 't', placement = 'detached'}, {block_id = 'src', placement = 'placed'}}}
+  end
+  local s = load_sandbox(T.plugin_dir, base, {
+    vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
+    catalog = {forwards = {t = {session_id = 's', source_block = 'src', port = 4321, target = '127.0.0.1:4321', profile = 'lazyrexlab-4321',
+      op = 'seed', created = '2026-10-19T00:00:00Z', creator = {kind = 'user'}}}},
+    rex = overrides})
+  assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
+  return s
+end
+local function panel_action(s, item)
+  return s:perform('view.action', {user = 'user', route = '/panels/tunnels', node_id = 'fw/t', action = item, input = {item_id = item}, operation_key = 'k-' .. item})
+end
+
+test('a Rex refusal of Show Logs keeps its code and message (sandbox)', function()
+  local s = forward_sandbox({['session.move_block'] = function()
+    return nil, rex_text('block src not found in any window', 404, 'not_found')
+  end})
+  local reply = panel_action(s, 'show')
+  assert_true(reply.error, 'Show Logs fails')
+  expect(reply.error.code).to_be('not_found')
+  expect(reply.error.message).to_be('block src not found in any window')
+end)
+
+test('a Rex refusal of the stop close keeps its code; the stop stays saved (sandbox)', function()
+  local s = forward_sandbox({['block.close'] = function()
+    return nil, rex_text('block not found: t', 404, 'not_found')
+  end})
+  local reply = panel_action(s, 'stop')
+  assert_true(reply.error, 'Stop fails')
+  expect(reply.error.code).to_be('not_found')
+  expect(reply.error.message).to_be('block not found: t')
+  expect(next(s.catalog.stops or {}), 'the stop is saved for a retry or maintenance').not_to_be(nil)
+  expect(s.catalog.forwards.t.port).to_be(4321)
+end)
+
+test('a Rex error without a code, or with timeout, stays unavailable (sandbox)', function()
+  for _, text in ipairs({rex_text('connection reset'), rex_text('deadline', 504, 'timeout'), rex_text('gone', 503, 'disconnected')}) do
+    local s = forward_sandbox({['session.move_block'] = function() return nil, text end})
+    local reply = panel_action(s, 'show')
+    expect(reply.error.code, text).to_be('unavailable')
+  end
+end)
