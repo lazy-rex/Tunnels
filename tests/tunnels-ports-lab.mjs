@@ -38,7 +38,7 @@ if (process.argv[2] === 'listener') {
     const a = await make('ports-a');
     const b = await make('ports-b');
     console.log(execFileSync('rex', ['-S', `unix://${lab}/rex.sock`, '--autostart=false', 'do', '-s', a,
-      path.join(path.dirname(self), 'tunnels-ports-unit.lua'),
+      path.join(path.dirname(self), 'legacy', 'tunnels-ports-unit.lua'),
       `module=${path.resolve(path.dirname(self), '../../Tunnels/tunnels_ports.lua')}`], {encoding: 'utf8'}).trim());
     const blocks = [];
     for (const [i, session] of [a, b].entries()) {
@@ -52,7 +52,7 @@ if (process.argv[2] === 'listener') {
     const module = path.resolve(path.dirname(self), '../../Tunnels/tunnels_ports.lua');
     await c.call('session.new_block', {session_id: a, flavor: 'com.superlogical.terminal.shell', options: {
       command: ['rex', '-S', `unix://${lab}/rex.sock`, '--autostart=false', 'do',
-        path.join(path.dirname(self), 'tunnels-ports-probe.lua'), `module=${module}`], login: false}});
+        path.join(path.dirname(self), 'legacy', 'tunnels-ports-probe.lua'), `module=${module}`], login: false}});
     const probe = await waitFor(async () => (await c.call('client.list')).clients.find(x => x.info?.label === 'tunnels-ports-probe'));
     const scan = async () => (await c.call('client.perform', {client_id: probe.client_id, action: 'ports.scan', args: {session_id: b}, timeout_ms: 10000})).result;
     let result = await scan();

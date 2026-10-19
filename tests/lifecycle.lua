@@ -1,0 +1,145 @@
+-- Failures and cleanup: the fake opentunnel switches (tests/fake-opentunnel.sh) make up, serve and
+-- down fail or wait. The plugin owns cleanup: it runs `down` for each ended forward in a block of
+-- its own session, with or without an open panel, across restarts. Ported from tests/tunnels-lab.mjs
+-- steps 9b-9d, 10 and 11. Panel rows (view) and tunnels.list (tool) report each state.
+
+local tests_dir = debug.getinfo(1, 'S').source:match('^@?(.*)/[^/]*$')
+dofile(tests_dir .. '/lib/guard.lua')(tests_dir)
+local T = dofile(tests_dir .. '/lib/tunnels.lua')(getfenv(1), tests_dir)
+
+local alice = agent('alice')
+local S = session('tunnels-life')
+local pane = T.shell(S, 'work')
+local function reset() for _, name in ipairs({'fail-up', 'slow-up', 'fail-serve', 'fail-down', 'slow-down'}) do T.flag(name, false) end end
+reset()
+
+-- down_blocks answers the cleanup blocks (label lazyrex-tunnel-down:) in every session.
+local function down_blocks()
+  local list = {}
+  for _, s in ipairs(rex.call('session.list', {}).sessions or {}) do
+    pcall(rex.call, 'session.attach', {session_id = s.session_id, event_scope = 'session'})
+    local r = rex.call('session.list_blocks', {session_id = s.session_id})
+    for _, b in ipairs(r and r.blocks or {}) do
+      if (b.label or ''):sub(1, 20) == 'lazyrex-tunnel-down:' then list[#list + 1] = b end
+    end
+  end
+  return list
+end
+local function state_of(p) local f = T.forward_of(p, alice); return f and f.state end
+
+test('a failed up leaves no service; the panel and the list show Failed', function()
+  reset()
+  local p = T.port()
+  T.forget(p)
+  T.flag('fail-up', true)
+  local b = T.forward_other(pane, p)
+  local v = T.panel(S)
+  wait('the panel shows Failed', function()
+    local r = T.row(v, 'fw/' .. b); return r and r.label:find('Port ' .. p .. ' · Failed (exit status 1)', 1, true)
+  end, 20)
+  expect(state_of(p)).to_be('Failed (exit status 1)')
+  expect(T.service(p)).to_be(false)
+  T.flag('fail-up', false)
+  expect(v:action('fw/' .. b, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
+  T.no_cleanup_for(p)
+end)
+
+test('an up interrupted by a block close is cleaned up by the plugin', function()
+  reset()
+  local p = T.port()
+  T.forget(p)
+  T.flag('slow-up', true)
+  local b = T.forward_other(pane, p)
+  wait('up registered the service', function() return T.service(p) end, 15)
+  rex.call('block.close', {session_id = S, block_id = b})
+  wait('the plugin removes the service', function() return not T.service(p) end, 20)
+  T.no_cleanup_for(p)
+  T.flag('slow-up', false)
+end)
+
+test('a failed serve shows its exit code', function()
+  reset()
+  local p = T.port()
+  T.forget(p)
+  T.flag('fail-serve', true)
+  local b = T.forward_other(pane, p)
+  local v = T.panel(S)
+  wait('the panel shows the serve failure', function()
+    local r = T.row(v, 'fw/' .. b); return r and r.label:find('Port ' .. p .. ' · Failed (exit status 3)', 1, true)
+  end, 20)
+  expect(state_of(p)).to_be('Failed (exit status 3)')
+  T.flag('fail-serve', false)
+  expect(v:action('fw/' .. b, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
+  T.no_cleanup_for(p)
+end)
+
+test('a session close during up is cleaned up with no panel open', function()
+  reset()
+  T.close_panels()
+  local p = T.port()
+  T.forget(p)
+  T.flag('slow-up', true)
+  local S3 = session('tunnels-three')
+  local three = T.shell(S3, 'three')
+  T.forward_other(three, p)
+  wait('up registered the service', function() return T.service(p) end, 15)
+  T.close_panels() -- Forward opened a panel in S3
+  close_session(S3)
+  wait('the plugin runs down without a panel', function() return not T.service(p) end, 30)
+  T.no_cleanup_for(p)
+  T.flag('slow-up', false)
+end)
+
+test('a failed down stays pending, shows its error, and succeeds after a restart', function()
+  reset()
+  local p = T.port()
+  T.forget(p)
+  -- The block closes during up, so the service registration remains for the plugin's down.
+  T.flag('slow-up', true)
+  local b = T.forward_other(pane, p)
+  wait('up registered the service', function() return T.service(p) end, 15)
+  T.close_panels()
+  T.flag('fail-down', true)
+  rex.call('block.close', {session_id = S, block_id = b})
+  wait('the cleanup is recorded', function() return T.cleanups()[1] == T.prefix .. p end, 30)
+  local cleanup = wait('the list shows the failure', function()
+    for _, c in pairs(T.list(alice).cleanups or {}) do if c.profile == T.prefix .. p and c.error then return c end end
+  end, 15)
+  expect(cleanup.error).to_be('exit status 1')
+  expect(T.service(p), 'the service remains').to_be(true)
+  local v = T.open_panel(pane)
+  expect(T.row(v, 'cleanup/' .. T.prefix .. p).text).to_contain('failed, retrying')
+  T.close_panels()
+  H.hub('hub.admin.stop', {plugin = 'tunnels'})
+  T.flag('fail-down', false)
+  H.hub('hub.admin.start', {plugin = 'tunnels'})
+  wait('the restarted plugin runs down', function() return not T.service(p) end, 30)
+  T.no_cleanup_for(p)
+end)
+
+test('a running down owns its profile: Forward is refused, and a restart starts no second down', function()
+  reset()
+  local p = T.port()
+  T.forget(p)
+  local b = T.forward_other(pane, p)
+  wait('the tunnel runs', function() return state_of(p) == 'Connected' end, 20)
+  T.flag('slow-down', true)
+  rex.call('block.close', {session_id = S, block_id = b})
+  wait('one down block runs', function() return #down_blocks() == 1 end, 20)
+  local before = #T.tunnel_blocks(S)
+  local op = T.submit(T.open_form(pane), p)
+  expect(op.status).to_be('failed')
+  expect(op.error.message).to_match('still stopping its previous tunnel')
+  expect(#T.tunnel_blocks(S)).to_be(before)
+  T.restart()
+  rex.sleep(3)
+  expect(T.cleanups()).to_contain(T.prefix .. p)
+  expect(#down_blocks()).to_be(1)
+  T.no_cleanup_for(p, 30)
+  wait('the down block is closed', function() return #down_blocks() == 0 end, 10)
+  T.flag('slow-down', false)
+  -- The port is free again.
+  local again = T.forward_other(pane, p)
+  rex.call('block.close', {session_id = S, block_id = again})
+  T.no_cleanup_for(p)
+end)
