@@ -18,8 +18,8 @@ The hub gives agents these actions (MCP tools):
 
 - `tunnels.list`: the forwards (state, URL, session, creator, logs shown), the forwards with an
   unknown start result (`pending`), and the opentunnel services that are still stopping (`cleanups`).
-- `tunnels.stop {forward, key}`: the panel's Stop. The user may stop any forward. An agent may stop
-  only a forward that an agent started. A retry with the same key returns the first result.
+- `tunnels.stop {forward, key}`: the panel's Stop. The user and any agent may stop any forward,
+  also one that another caller started. A retry with the same key returns the first result.
 - `tunnels.ports {session_id?}`: a new scan of the listening ports, as the form's Rescan. It
   changes only the scan that the form shows, so it takes no key.
 

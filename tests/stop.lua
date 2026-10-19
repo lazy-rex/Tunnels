@@ -1,5 +1,5 @@
--- Stop on both paths: the panel item (view) and tunnels.stop (tool). They call one handler with one
--- rule: the user may stop any forward; an agent may stop only a forward that an agent created. A
+-- Stop on both paths: the panel item (view) and tunnels.stop (tool). They call one handler: the
+-- user and any agent may stop any forward (LazyRex docs/decisions.md, 7cf0851). A
 -- stop is saved before its block closes, so a key replays its first result after a failed final
 -- write, maintenance, or a plugin restart. Forwards use the fake opentunnel (lib/guard.lua).
 
@@ -21,8 +21,11 @@ local function stop_key(agent_id, key) return 'stop/' .. part('agent') .. part(a
 local function catalog() return store('forwards').value or {} end
 -- down_calls counts the `down` calls of port p's profile in the fake's call log.
 local function down_calls(p)
-  local r = rex.exec({'/bin/sh', '-c', 'grep -cx "lazyrexlab-' .. p .. ' down" "$FAKE_OT_DIR/calls.log" || true'}, {timeout = 5})
-  return tonumber((r and r.stdout or ''):match('%d+')) or 0
+  -- A failed read raises: a silent 0 would make a count look wrong.
+  local r = rex.exec({'/bin/sh', '-c', 'test -f "$FAKE_OT_DIR/calls.log" || exit 0; grep -cx "lazyrexlab-' .. p .. ' down" "$FAKE_OT_DIR/calls.log" || true'}, {timeout = 5})
+  local n = r and r.ok and ((r.stdout or '') == '' and 0 or tonumber((r.stdout or ''):match('^%s*(%d+)%s*$')))
+  if not n then error('down_calls: the call log read failed: ' .. tostring(r and (r.error or r.stderr or r.exit_code)), 2) end
+  return n
 end
 local function blocks() local by_id = {}; for _, b in ipairs(rex.call('session.list_blocks', {session_id = S}).blocks) do by_id[b.block_id] = b end; return by_id end
 local function listed(id) for _, f in pairs(alice:call('tunnels.list', {}).forwards or {}) do if f.id == id then return f end end end
@@ -82,21 +85,34 @@ test('the user stops a forward from the panel; tunnels.list and Rex agree', func
   no_cleanup_for(p)
 end)
 
-test('an agent cannot stop a user forward or a forward without a creator', function()
-  local p = port()
-  local f = forward_by_user(p)
-  expect_error(function() alice:call('tunnels.stop', {forward = f.id, key = 'user-fw'}) end, 'Only the user can stop it')
+test('an agent stops a user forward, a forward without a creator and one with a malformed creator', function()
+  -- The user decision (LazyRex docs/decisions.md, 7cf0851): an agent may stop any forward.
+  local p1, p2, p3 = port(), port(), port()
+  local f = forward_by_user(p1)
+  expect(f.created_by).to_be('user')
+  -- The run script calls down before serve; serve connects after it. Count from then on.
+  wait('the forward is connected', function() local x = listed(f.id); return x and x.state == 'Connected' end, 15)
+  local downs = down_calls(p1)
+  local r = alice:call('tunnels.stop', {forward = f.id, key = 'user-fw'})
+  expect(r).to_equal({forward = f.id, stopped = true})
+  expect(blocks()[f.id]).to_be(nil)
+  expect(listed(f.id)).to_be(nil)
+  -- The key replays its first result; the same key with another forward conflicts.
+  expect(alice:call('tunnels.stop', {forward = f.id, key = 'user-fw'})).to_equal(r)
+  local legacy = seed(p2) -- no creator
+  expect(listed(legacy).created_by).to_be('user')
+  expect_error(function() alice:call('tunnels.stop', {forward = legacy, key = 'user-fw'}) end, 'operation_conflict')
+  assert_true(blocks()[legacy], 'the conflict closed nothing')
+  expect(alice:call('tunnels.stop', {forward = legacy, key = 'legacy-fw'})).to_equal({forward = legacy, stopped = true})
+  expect(blocks()[legacy]).to_be(nil)
+  local malformed = seed(p3)
   local value = catalog()
-  value.forwards[f.id].creator = nil
+  value.forwards[malformed].creator = {kind = 'agent', agent = ''}
   write({{key = 'forwards', value = value}})
-  expect_error(function() alice:call('tunnels.stop', {forward = f.id, key = 'legacy-fw'}) end, 'Only the user can stop it')
-  value = catalog()
-  value.forwards[f.id].creator = {kind = 'agent', agent = ''}
-  write({{key = 'forwards', value = value}})
-  expect_error(function() alice:call('tunnels.stop', {forward = f.id, key = 'malformed-fw'}) end, 'Only the user can stop it')
-  assert_true(blocks()[f.id], 'the refused stops closed nothing')
-  expect(panel():action('fw/' .. f.id, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
-  no_cleanup_for(p)
+  expect(bob:call('tunnels.stop', {forward = malformed, key = 'malformed-fw'})).to_equal({forward = malformed, stopped = true})
+  expect(blocks()[malformed]).to_be(nil)
+  for _, p in ipairs({p1, p2, p3}) do no_cleanup_for(p) end
+  expect(down_calls(p1) - downs, 'one cleanup down for the user forward').to_be(1)
 end)
 
 test('an agent stops an agent forward; the key replays; another forward with the key conflicts', function()

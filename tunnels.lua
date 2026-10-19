@@ -444,8 +444,8 @@ local function result_of(saved, fingerprint)
   return saved.result
 end
 
--- stop_forward stops the forward of block_id for caller. The user may stop any forward; an agent
--- may stop only a forward that an agent created.
+-- stop_forward stops the forward of block_id for caller. The user and any agent may stop any
+-- forward (LazyRex docs/decisions.md, 7cf0851).
 local function stop_forward(caller, block_id, key)
   if type(block_id) ~= 'string' or block_id == '' then fail('invalid_input', 'forward is required') end
   if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
@@ -460,7 +460,6 @@ local function stop_forward(caller, block_id, key)
   else
     local fw = state.forwards[block_id]
     if not fw then fail('not_found', 'This forward has stopped') end
-    if caller ~= 'user' and creator(fw).kind ~= 'agent' then fail('refused', 'The user started this forward. Only the user can stop it.') end
     st = {forward = block_id, session_id = fw.session_id, port = fw.port, profile = fw.profile, fingerprint = fingerprint, saved_at = os.time()}
     update(function(s)
       if not s.forwards[block_id] then fail('not_found', 'This forward has stopped') end
@@ -721,7 +720,7 @@ local agent_actions = {
     description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups). Empty lists can appear as {}.',
     args = {type = 'object', properties = {}, additionalProperties = false}},
   {name = 'tunnels.stop', kind = 'client', title = 'Stop a forwarded port',
-    description = 'Stop a forward from tunnels.list (forward = its id). An agent can stop only a forward that an agent started. Choose a key and retry with the same content after an unknown outcome.',
+    description = 'Stop a forward from tunnels.list (forward = its id), also one that the user or another agent started. Choose a key and retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {forward = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
       required = {'forward', 'key'}, additionalProperties = false}},
   {name = 'tunnels.ports', kind = 'client', title = 'Scan listening ports',

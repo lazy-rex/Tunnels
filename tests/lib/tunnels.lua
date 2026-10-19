@@ -22,8 +22,11 @@ return function(E, tests_dir)
 
   -- down_calls counts the `down` calls of port p's profile in the fake's call log.
   function T.down_calls(p)
-    local ok, r = sh('grep -cx ' .. q(T.prefix .. p .. ' down') .. ' ' .. q(T.fake .. '/calls.log') .. ' || true')
-    return tonumber((r and r.stdout or ''):match('%d+')) or 0
+    -- A failed read raises: a silent 0 would make a count look wrong. No log yet is 0 calls.
+    local ok, r = sh('test -f ' .. q(T.fake .. '/calls.log') .. ' || exit 0; grep -cx ' .. q(T.prefix .. p .. ' down') .. ' ' .. q(T.fake .. '/calls.log') .. ' || true')
+    local n = ok and ((r.stdout or '') == '' and 0 or tonumber((r.stdout or ''):match('^%s*(%d+)%s*$')))
+    if not n then error('down_calls: the call log read failed: ' .. tostring(r and (r.error or r.stderr or r.exit_code)), 2) end
+    return n
   end
   -- down_blocks answers the cleanup blocks (label lazyrex-tunnel-down:) in every session.
   function T.down_blocks()
