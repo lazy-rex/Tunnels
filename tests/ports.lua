@@ -96,6 +96,7 @@ test('a descendant listener belongs to its pane; the given session sorts first',
   wait_port(b, la.port)
   local r = wait('both listeners', function() local x = scan(b); return row(x, lb.port) and row(x, la.port) and x end, 15)
   expect(r.session_id).to_be(b)
+  expect(next(r.warnings or {}), 'no warnings').to_be(nil)
   local first = rows_of(r)[1]
   expect(first.session_id, 'the given session sorts first').to_be(b)
   for _, l in ipairs({la, lb}) do
