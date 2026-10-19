@@ -495,6 +495,21 @@ local function stop_forward(caller, block_id, key)
   return result
 end
 
+-- refused_before_create answers {code, message} when err (a table or Rex error text) is a refusal
+-- that Rex gives before it creates a block, else nil. Only input validation is known to be one:
+-- bad_request, observed on Rex 0.0.1792158932-g88fd41 (a label over 128 characters). Any other code,
+-- internal or unknown included, can follow a create, so the outcome stays unknown.
+local function refused_before_create(err)
+  local code, msg
+  if type(err) == 'table' then
+    code, msg = err.code, err.message
+  else
+    local text = tostring(err or '')
+    code = text:match('code=([%w_]+)%)$')
+    msg = text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text
+  end
+  if code == 'bad_request' then return {code = code, message = type(msg) == 'string' and msg ~= '' and msg or 'Rex refused the request'} end
+end
 -- enc writes every byte outside [A-Za-z0-9-] as '_' and two hex digits, so an agent ID and key fit
 -- a Rex label and the ps proof (no space or quote).
 local function enc(value) return (tostring(value):gsub('[^%w%-]', function(c) return string.format('_%02x', c:byte()) end)) end
@@ -568,12 +583,10 @@ local function start_forward(req)
   local created, err = rex.call('session.new_block', {session_id = intent.session_id, flavor = 'com.superlogical.terminal.shell',
     label = label_of(id), options = {command = command, login = false, exit = {on_completion = false}}})
   if not (created and created.block_id) then
-    local _, e = pcall(function()
-      if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Rex request failed') end
-      text_error(err, 'Rex request failed')
-    end)
-    if type(e) == 'table' and e.code ~= 'unavailable' then
-      -- A definite refusal: Rex created no block. The intent and its port go; the key replays the error.
+    local e = refused_before_create(err)
+    if e then
+      -- Rex refused the request before it created a block. The intent and its port go; the key
+      -- replays the error.
       local result = {error = {code = e.code, message = e.message}}
       update(function(s) s.intents[id] = nil end, {key = id, fingerprint = intent.fingerprint, result = result})
       invalidate()

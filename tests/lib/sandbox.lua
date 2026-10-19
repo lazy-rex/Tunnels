@@ -2,7 +2,7 @@
 -- no process and reaches no Rex server or hub. Usage:
 --   local sandbox = dofile(tests_dir .. '/lib/sandbox.lua')
 --   local s = sandbox(plugin_dir, base_env, {vars = {...}, executables = {[path] = true},
---     catalog = <forwards record value>, ops = {[key] = {fingerprint, result}},
+--     catalog = <forwards record value>, ops = {[key] = {fingerprint, result}}, ps = function(argv) return result end,
 --     rex = {[method] = function(args) return result, err end}})
 -- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
 -- catalog, the saved operation records (ops), and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
@@ -19,6 +19,7 @@ return function(plugin_dir, base, opts)
     exec = function(argv)
       s.execs[#s.execs + 1] = argv
       if argv[1] == '/bin/test' and argv[2] == '-x' then return {ok = executables[argv[3]] == true} end
+      if opts.ps and argv[1] == '/bin/ps' then return opts.ps(argv) end
       error('the sandbox runs no process: ' .. tostring(argv[1]))
     end,
     call = function(method, args)

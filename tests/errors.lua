@@ -145,11 +145,46 @@ test('a definite Rex refusal of the tunnel create ends the Forward with its code
   expect(calls, 'one create').to_be(1)
 end)
 
-test('a Rex create error without a definite code keeps the intent as an unknown result (sandbox)', function()
-  for _, text in ipairs({rex_text('connection reset'), rex_text('deadline', 504, 'timeout')}) do
-    local s = create_sandbox(function() return nil, text end)
+test('a create error other than a validation refusal keeps the intent as an unknown result (sandbox)', function()
+  -- Text and table forms. Only bad_request is known to come before a create.
+  for _, err in ipairs({rex_text('connection reset'), rex_text('deadline', 504, 'timeout'), rex_text('crash', 500, 'internal'),
+      rex_text('new', 409, 'some_future_code'), {code = 'timeout', message = 'deadline'}, {code = 'disconnected', message = 'gone'},
+      {code = 'internal', message = 'crash'}, {code = 'not_found', message = 'session'}}) do
+    local s = create_sandbox(function() return nil, err end)
     local reply = form_forward(s, 'lost-create', 4321)
-    expect(reply.error.code, text).to_be('unavailable')
-    expect(s.catalog.intents['lost-create'].port).to_be(4321)
+    local label = type(err) == 'table' and err.code or err
+    expect(reply.error.code, label).to_be('unavailable')
+    expect(s.catalog.intents['lost-create'].port, label).to_be(4321)
   end
+end)
+
+test('a table bad_request is a refusal too (sandbox)', function()
+  local s = create_sandbox(function() return nil, {code = 'bad_request', message = 'label must be at most 128 characters'} end)
+  expect(form_forward(s, 'table-refused', 4321).error.code).to_be('bad_request')
+  expect((next(s.catalog.intents or {}))).to_be(nil)
+end)
+
+test('an internal error after a real create keeps the reservation; the retry adopts the block with proof (sandbox)', function()
+  local created, calls = false, 0
+  local s = load_sandbox(T.plugin_dir, base, {
+    vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
+    -- ps shows the run script with the key, started one second ago.
+    ps = function() return {ok = true, stdout = '   00:01 /bin/sh ' .. T.plugin_dir .. '/tunnels-run.sh internal-1 ' .. T.fixture .. ' lazyrexlab-4321 127.0.0.1:4321\n'} end,
+    rex = {
+      -- Rex creates the block, then answers internal.
+      ['session.new_block'] = function() calls = calls + 1; created = true; return nil, rex_text('crash after create', 500, 'internal') end,
+      ['session.list_blocks'] = function()
+        return {blocks = created and {{block_id = 'b1', label = 'lazyrex-tunnel:internal-1', placement = 'detached'}} or {}}
+      end,
+      ['com.superlogical.terminal.process'] = function() return {child = {pid = 77}} end,
+    }})
+  assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
+  expect(form_forward(s, 'internal-1', 4321).error.code).to_be('unavailable')
+  expect(s.catalog.intents['internal-1'].port, 'the port stays reserved').to_be(4321)
+  expect(form_forward(s, 'other-key', 4321).error.code).to_be('conflict')
+  local again = form_forward(s, 'internal-1', 4321)
+  expect(again.result).to_equal({panel = {command = 'tunnels'}})
+  expect(s.catalog.forwards.b1.port).to_be(4321)
+  expect((next(s.catalog.intents or {}))).to_be(nil)
+  expect(calls, 'no second create').to_be(1)
 end)
