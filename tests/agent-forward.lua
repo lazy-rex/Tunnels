@@ -225,14 +225,9 @@ test('view keys: a legacy v1 record replays; a new key with another source pane 
   local op = T.submit(T.open_form(pane), p, 'legacy-view-' .. p)
   expect(op.status).to_be('succeeded')
   expect(#T.tunnel_blocks(S), 'the replay started nothing').to_be(0)
-  T.panel(S) -- the replayed result opens the panel too (see the askRelease note below)
   -- A new view operation: the source pane is part of the fingerprint.
   local first = T.submit(T.open_form(pane), p, 'view-v2-' .. p)
   expect(first.status).to_be('succeeded')
-  -- The Forward result opens the panel. Wait for its render before the next palette command: the
-  -- hub's askRelease defect (LazyRex, open) refuses a command with 409 while a new panel renderer
-  -- is not attached.
-  T.panel(S)
   -- The hub keeps the arguments of a view operation and refuses the same key with other ones
   -- before the plugin sees it. The plugin's own check of the source pane is tested in the sandbox.
   expect_error(function() T.submit(T.open_form(two), p, 'view-v2-' .. p) end, 'different arguments')
