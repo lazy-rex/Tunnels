@@ -20,14 +20,22 @@ return function(E, tests_dir)
   -- forget removes the fake identity of port p, so the run script calls up again.
   function T.forget(p) sh('rm -f ' .. q(T.fake .. '/' .. T.prefix .. p .. '.id')) end
 
-  -- down_calls counts the `down` calls of port p's profile in the fake's call log.
-  function T.down_calls(p)
-    -- A failed read raises: a silent 0 would make a count look wrong. No log yet is 0 calls.
-    local ok, r = sh('test -f ' .. q(T.fake .. '/calls.log') .. ' || exit 0; grep -cx ' .. q(T.prefix .. p .. ' down') .. ' ' .. q(T.fake .. '/calls.log') .. ' || true')
-    local n = ok and ((r.stdout or '') == '' and 0 or tonumber((r.stdout or ''):match('^%s*(%d+)%s*$')))
-    if not n then error('down_calls: the call log read failed: ' .. tostring(r and (r.error or r.stderr or r.exit_code)), 2) end
+  -- count_lines counts the lines of the file at path that equal line. A missing file counts 0.
+  -- Every other failure raises: a failed exec, a grep error (exit status 2 or more), or output that
+  -- is not one number. exec is rex.exec unless a test gives a stand-in.
+  function T.count_lines(path, line, exec)
+    local script = 'if [ ! -e "$1" ]; then echo 0; exit 0; fi; grep -cx -- "$2" "$1"; s=$?; [ "$s" -le 1 ] && exit 0; exit "$s"'
+    local r = (exec or rex.exec)({'/bin/sh', '-c', script, 'count', path, line}, {timeout = 10})
+    local digits = r and r.ok and type(r.stdout) == 'string' and r.stdout:match('^(%d+)\n?$')
+    local n = digits and tonumber(digits)
+    if not n then
+      error('count_lines: the read of ' .. path .. ' failed: ' .. (r and ('exit ' .. tostring(r.exit_code) .. ', stdout "' .. tostring(r.stdout) .. '", stderr "'
+        .. tostring(r.stderr) .. '"' .. (r.error and (', ' .. tostring(r.error)) or '')) or 'no result'), 2)
+    end
     return n
   end
+  -- down_calls counts the `down` calls of port p's profile in the fake's call log.
+  function T.down_calls(p) return T.count_lines(T.fake .. '/calls.log', T.prefix .. p .. ' down') end
   -- down_blocks answers the cleanup blocks (label lazyrex-tunnel-down:) in every session.
   function T.down_blocks()
     local list = {}

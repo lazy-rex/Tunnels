@@ -19,14 +19,9 @@ local function part(v) return #v .. ':' .. v .. '/' end
 local function stop_key(agent_id, key) return 'stop/' .. part('agent') .. part(agent_id) .. part(key) end
 
 local function catalog() return store('forwards').value or {} end
--- down_calls counts the `down` calls of port p's profile in the fake's call log.
-local function down_calls(p)
-  -- A failed read raises: a silent 0 would make a count look wrong.
-  local r = rex.exec({'/bin/sh', '-c', 'test -f "$FAKE_OT_DIR/calls.log" || exit 0; grep -cx "lazyrexlab-' .. p .. ' down" "$FAKE_OT_DIR/calls.log" || true'}, {timeout = 5})
-  local n = r and r.ok and ((r.stdout or '') == '' and 0 or tonumber((r.stdout or ''):match('^%s*(%d+)%s*$')))
-  if not n then error('down_calls: the call log read failed: ' .. tostring(r and (r.error or r.stderr or r.exit_code)), 2) end
-  return n
-end
+-- down_calls counts the `down` calls of port p's profile in the fake's call log (lib/tunnels.lua).
+local T = dofile(tests_dir .. '/lib/tunnels.lua')(getfenv(1), tests_dir)
+local down_calls = T.down_calls
 local function blocks() local by_id = {}; for _, b in ipairs(rex.call('session.list_blocks', {session_id = S}).blocks) do by_id[b.block_id] = b end; return by_id end
 local function listed(id) for _, f in pairs(alice:call('tunnels.list', {}).forwards or {}) do if f.id == id then return f end end end
 -- quiet waits until no cleanup, stop or intent is in progress, so an injection meets only the batch under test.
