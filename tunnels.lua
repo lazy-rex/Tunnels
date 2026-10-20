@@ -282,13 +282,15 @@ local function advance_cleanups()
           c.result = {error = 'stopped before its result: ' .. tostring(process.last_exit.error or process.last_exit.exit_code)}
         end
         if c.result then
-          local result, saved = c.result, false
+          -- A table field, not a local: in Rex Lua a closure's write to a captured local can be lost
+          -- after a caught error (observed on Rex 0.0.1792158932-g88fd41).
+          local result, done = c.result, {saved = false}
           update(function(s)
             local x = s.cleanups[profile]
-            saved = type(x) == 'table' and x.phase == 'running' and x.block_id == c.block_id
-            if saved then x.phase, x.result = 'closing', result end
+            done.saved = type(x) == 'table' and x.phase == 'running' and x.block_id == c.block_id
+            if done.saved then x.phase, x.result = 'closing', result end
           end)
-          if saved then c.phase = 'closing' end
+          if done.saved then c.phase = 'closing' end
         end
       end
     end
