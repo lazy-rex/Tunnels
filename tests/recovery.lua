@@ -279,3 +279,49 @@ test('only the exact receipt line of the attempt counts (sandbox)', function()
   expect(state.closes).to_be(0)
   expect(cleanup_of(s).phase).to_be('running')
 end)
+
+-- A cleanup create that Rex refuses before it creates a block (bad_request, as for Forward) ends
+-- that attempt: it goes to retry with the error. Any other create error can follow a create, so the
+-- attempt stays sending (unknown result) and keeps the profile.
+local function create_cleanup_sandbox(err)
+  local s
+  s = load_sandbox(T.plugin_dir, base, {
+    vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
+    catalog = {cleanups = {['lazyrexlab-4321'] = {phase = 'new'}}},
+    rex = {
+      ['session.list'] = function() return {sessions = {{session_id = 'plugin'}, {session_id = 's'}}} end,
+      ['session.list_blocks'] = function(a) return {blocks = a.session_id == 's' and {{block_id = 'src', placement = 'placed'}} or {}} end,
+      ['session.new_block'] = function(a) s.calls[#s.calls + 1] = a; return nil, err end,
+    }})
+  s.calls = {}
+  assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
+  return s
+end
+
+test('a definite Rex refusal of the cleanup create ends the attempt; the cleanup retries (sandbox)', function()
+  for _, err in ipairs({'stream response "control-15" failed: input: validating: label must be at most 128 characters (status=400 code=bad_request)',
+      {code = 'bad_request', message = 'label must be at most 128 characters'}}) do
+    local s = create_cleanup_sandbox(err)
+    s:tick()
+    local c = cleanup_of(s)
+    expect(c.phase, 'not an unknown result').to_be('retry')
+    expect(c.block_id).to_be(nil)
+    assert_true(type(c.retry_at) == 'number' and c.retry_at > os.time(), 'the retry waits')
+    -- down did not run, so the profile stays reserved: Forward of the port is refused.
+    local reply = s:perform('view.action', {user = 'user', route = '/forms/forward', node_id = 'forward', action = 'forward',
+      input = {values = {port = 'other', other = '4321'}}, context = {session_id = 's', source_block_id = 'src'}, operation_key = 'after-refusal'})
+    assert_true(reply.error, 'Forward fails')
+    expect(reply.error.code).to_be('conflict')
+    expect(reply.error.message).to_match('still stopping')
+    expect(#s.calls, 'only the one cleanup create').to_be(1)
+  end
+end)
+
+test('a cleanup create error other than a validation refusal stays an unknown result (sandbox)', function()
+  for _, err in ipairs({'stream response "control-15" failed: crash (status=500 code=internal)', 'connection reset',
+      {code = 'timeout', message = 'deadline'}, {code = 'not_found', message = 'session'}}) do
+    local s = create_cleanup_sandbox(err)
+    s:tick()
+    expect(cleanup_of(s).phase, type(err) == 'table' and err.code or err).to_be('sending')
+  end
+end)

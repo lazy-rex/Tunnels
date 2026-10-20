@@ -221,6 +221,21 @@ local function drop(id, intent, result)
   update(function(s) s.intents[id] = nil; s.cleanups[intent.profile] = s.cleanups[intent.profile] or {phase = 'new'} end, {key = id, fingerprint = intent.fingerprint, result = result})
 end
 
+-- refused_before_create answers {code, message} when err (a table or Rex error text) is a refusal
+-- that Rex gives before it creates a block, else nil. Only input validation is known to be one:
+-- bad_request, observed on Rex 0.0.1792158932-g88fd41 (a label over 128 characters). Any other code,
+-- internal or unknown included, can follow a create, so the outcome stays unknown.
+local function refused_before_create(err)
+  local code, msg
+  if type(err) == 'table' then
+    code, msg = err.code, err.message
+  else
+    local text = tostring(err or '')
+    code = text:match('code=([%w_]+)%)$')
+    msg = text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text
+  end
+  if code == 'bad_request' then return {code = code, message = type(msg) == 'string' and msg ~= '' and msg or 'Rex refused the request'} end
+end
 local cleanup_errors = {} -- profile -> the last failure, shown in the panel
 local cleanup_seq = 0
 local down_prefix = 'lazyrex-tunnel-down:'
@@ -309,11 +324,19 @@ local function advance_cleanups()
         cleanup_seq = cleanup_seq + 1
         local key = instance_id .. '-' .. now .. '-' .. cleanup_seq
         set_cleanup(profile, function(x) x.phase, x.key, x.saved_at, x.block_id, x.result = 'sending', key, now, nil, nil end)
-        local created = rex.call('session.new_block', {session_id = plugin_session, flavor = 'com.superlogical.terminal.shell',
+        local created, err = rex.call('session.new_block', {session_id = plugin_session, flavor = 'com.superlogical.terminal.shell',
           label = down_prefix .. key, options = {command = {'/bin/sh', plugin_dir .. '/tunnels-down.sh', key, opentunnel, profile},
           login = false, exit = {on_completion = false}}})
         if created and created.block_id then
           set_cleanup(profile, function(x) if x.key == key then x.phase, x.block_id = 'running', created.block_id end end)
+        else
+          -- A refusal before any create ends this attempt. The record stays, so the profile stays
+          -- reserved: down did not run. Any other error keeps the result unknown (sending).
+          local refused = refused_before_create(err)
+          if refused then
+            cleanup_errors[profile] = refused.message
+            set_cleanup(profile, function(x) if x.key == key then x.phase, x.block_id, x.retry_at = 'retry', nil, now + 5 end end)
+          end
         end
       end
     end
@@ -495,21 +518,6 @@ local function stop_forward(caller, block_id, key)
   return result
 end
 
--- refused_before_create answers {code, message} when err (a table or Rex error text) is a refusal
--- that Rex gives before it creates a block, else nil. Only input validation is known to be one:
--- bad_request, observed on Rex 0.0.1792158932-g88fd41 (a label over 128 characters). Any other code,
--- internal or unknown included, can follow a create, so the outcome stays unknown.
-local function refused_before_create(err)
-  local code, msg
-  if type(err) == 'table' then
-    code, msg = err.code, err.message
-  else
-    local text = tostring(err or '')
-    code = text:match('code=([%w_]+)%)$')
-    msg = text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text
-  end
-  if code == 'bad_request' then return {code = code, message = type(msg) == 'string' and msg ~= '' and msg or 'Rex refused the request'} end
-end
 -- enc writes every byte outside [A-Za-z0-9-] as '_' and two hex digits, so an agent ID and key fit
 -- a Rex label and the ps proof (no space or quote).
 local function enc(value) return (tostring(value):gsub('[^%w%-]', function(c) return string.format('_%02x', c:byte()) end)) end
