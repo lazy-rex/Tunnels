@@ -460,9 +460,10 @@ local function advance_cleanups()
     elseif c.phase == 'sending' then
       local block = by_id and proven(by_id, down_prefix .. c.key, c.key, c.saved_at, plugin_session, 'tunnels-down.sh')
       if block then set_cleanup(profile, function(x) x.phase, x.block_id = 'running', block.block_id end)
-      elseif not by_id then set_cleanup(profile, function(x) x.phase, x.retry_at = 'retry', now end)
       elseif c.fence_v == 1 and type(c.attempt) == 'string' then
         -- No proof. The claim decides: a plugin claim means that this attempt can never run down.
+        -- A missing plugin session is no proof of either kind, so the claim and the process checks
+        -- apply when the session is not listed too.
         local owner, why = claim_attempt(c.attempt)
         local code = owner == 'script' and attempt_exit(c.attempt)
         if owner == 'plugin' or (code and code ~= 0) then
@@ -485,10 +486,16 @@ local function advance_cleanups()
           else cleanup_errors[profile] = busy end
         else cleanup_errors[profile] = why end
       end
-      -- Otherwise the create result stays unknown: the profile stays owned.
+      -- Otherwise the create result stays unknown: the profile stays owned. That holds for a legacy
+      -- record (no fence_v) also when the plugin session is not listed: a create that Rex accepted
+      -- earlier can still start the old script, which has no fence. Only an explicit release by the user
+      -- can end it (decision "Cleanup attempt fence", J).
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
+      -- No new attempt while the plugin session is not listed: its create would fail, and each try
+      -- would leave one more attempt directory.
       local opentunnel, why = find_opentunnel()
       local dir, key, attempt
+      if not by_id then opentunnel, why = nil, 'the plugin session is not listed' end
       if opentunnel then dir, why = fence() end
       if dir then
         key = random_hex(16)

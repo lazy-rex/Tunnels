@@ -299,6 +299,74 @@ test('a record without fence_v is never claimed (sandbox)', function()
   for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/ln', 'no claim') end
 end)
 
+-- A plugin session that session.list does not show is no process or fence proof.
+local NO_SESSION = {['session.list'] = function() return {sessions = {}} end}
+
+test('a missing plugin session does not bypass a live script claim (sandbox)', function()
+  -- The regression of the review: the record went to retry while its wrapper still ran.
+  local fs = {}
+  local c = fenced(fs, 'ga')
+  fs[c.attempt .. '/claim'] = {link = 'script'}
+  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', processes = {PLUGIN, wrapper_line('ga')}, rex = NO_SESSION})
+  s:tick()
+  expect(record(s).phase, 'the wrapper can still run down').to_be('sending')
+  -- The fence decision applies without the session: nothing of the attempt runs, so it retries.
+  s.processes = {PLUGIN}
+  s:tick()
+  expect(record(s).phase).to_be('retry')
+  expect(#s.calls, 'no create without the session').to_be(0)
+end)
+
+test('a missing plugin session: a plugin claim retries; a script exit 0 goes through the gate (sandbox)', function()
+  local fs = {}
+  local c = fenced(fs, 'gb')
+  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', rex = NO_SESSION})
+  s:tick()
+  expect(fs[c.attempt .. '/claim'].link).to_be('plugin')
+  expect(record(s).phase).to_be('retry')
+  fs = {}
+  c = fenced(fs, 'gc')
+  fs[c.attempt .. '/claim'] = {link = 'script'}
+  fs[c.attempt .. '/exit'] = {data = '0\n'}
+  s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', processes = {PLUGIN, DOWN}, rex = NO_SESSION})
+  s:tick()
+  expect(record(s).phase, 'a down child runs').to_be('sending')
+  s.processes = {PLUGIN}
+  s:tick()
+  expect(record(s)).to_be(nil)
+end)
+
+test('a missing plugin session keeps a legacy sending record (sandbox)', function()
+  -- A create that Rex accepted earlier can still start the old script, which has no fence.
+  local s = fence_sandbox({phase = 'sending', key = 'gd', saved_at = os.time() - 1}, {rex = NO_SESSION})
+  s:tick()
+  s:tick()
+  expect(record(s).phase).to_be('sending')
+  expect(record(s).key, 'the same attempt').to_be('gd')
+  expect(#s.calls, 'no create').to_be(0)
+  for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/ln', 'no claim') end
+end)
+
+test('a missing plugin session starts no new attempt (sandbox)', function()
+  for _, phase in ipairs({'new', 'retry'}) do
+    local s = fence_sandbox({phase = phase, retry_at = 0}, {rex = NO_SESSION})
+    s:tick()
+    expect(#s.calls, phase .. ': no create').to_be(0)
+    for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/mkdir', phase .. ': no attempt directory') end
+    expect(record(s).phase, phase).to_be(phase)
+  end
+end)
+
+test('a missing plugin session keeps a running or a closing record as it is (sandbox)', function()
+  local running = fence_sandbox({phase = 'running', key = 'ge', saved_at = 0, block_id = 'b'}, {rex = NO_SESSION})
+  running:tick()
+  expect(record(running).phase).to_be('running')
+  expect(record(running).block_id).to_be('b')
+  local closing = fence_sandbox({phase = 'closing', key = 'gf', saved_at = 0, block_id = 'b', result = {ok = true}}, {rex = NO_SESSION})
+  closing:tick()
+  expect(record(closing).phase).to_be('closing')
+end)
+
 -- Lab: the real script.
 local S = session('tunnels-fence')
 local pane = T.shell(S, 'work')
