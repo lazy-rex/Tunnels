@@ -11,7 +11,11 @@
 -- or {data = text}. The stub answers /bin/test -d, /bin/mkdir [-p], /bin/ln -s, /usr/bin/readlink
 -- and /bin/cat from it. opts.fs gives the start state; opts.exec(argv) answers a call first, when it
 -- returns a result (for failures that the file system cannot show).
--- server.whoami answers pid 4242. A full process read (/bin/ps -axww) lists s.processes (lines
+-- The stub store keeps a revision (s.rev): a batch with an older if_rev answers a revision conflict
+-- and counts it in s.conflicts. s.before_batch(s), if set, runs once at the start of the next batch,
+-- so a test can change the record between the plugin's read and its write. A batch whose op key is
+-- saved answers op_exists (same fingerprint) or an operation conflict. hub.identify answers the
+-- agent alice. server.whoami answers pid 4242. A full process read (/bin/ps -axww) lists s.processes (lines
 -- "<pid> <command>"; opts.processes, default only the plugin, pid 4242).
 return function(plugin_dir, base, opts)
   opts = opts or {}
@@ -20,8 +24,14 @@ return function(plugin_dir, base, opts)
   -- The stub keeps its state in fields of s: a closure that reassigns a captured local can write a
   -- detached copy after a caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
   local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = opts.catalog or {}, ops = opts.ops or {}, fs = opts.fs or {},
-    processes = opts.processes or {'4242 /usr/local/bin/rex do tunnels.lua'}}
+    processes = opts.processes or {'4242 /usr/local/bin/rex do tunnels.lua'}, rev = 1, conflicts = 0}
   local function parent(path) return path:match('^(.*)/[^/]+$') end
+  local function copy(v)
+    if type(v) ~= 'table' then return v end
+    local r = {}
+    for k, x in pairs(v) do r[k] = copy(x) end
+    return r
+  end
   local function fs_exec(argv)
     local fs, cmd = s.fs, argv[1]
     if cmd == '/bin/test' and argv[2] == '-d' then return {ok = fs[argv[3]] ~= nil and fs[argv[3]].dir == true} end
@@ -69,17 +79,28 @@ return function(plugin_dir, base, opts)
     call = function(method, args)
       if overrides[method] then return overrides[method](args) end
       if method == 'client.perform' then
-        if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = '1', value = s.catalog}}}} end
+        -- A copy, as from the hub: a change that the plugin does not write must not reach the store.
+        if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = tostring(s.rev), value = copy(s.catalog)}}}} end
         if args.action == 'hub.store.op' then
           local op = s.ops[args.args.key]
           if op then return {result = {found = true, fingerprint = op.fingerprint, result = op.result}} end
           return {result = {found = false}}
         end
         if args.action == 'hub.store.batch' then
-          s.catalog = args.args.ops[1].value
+          -- As the hub: a saved op first, then the revision condition.
+          local hook = s.before_batch
+          s.before_batch = nil
+          if hook then hook(s) end
+          local op = args.args.op and s.ops[args.args.op.key]
+          if op and op.fingerprint == args.args.op.fingerprint then return {result = {op_exists = {fingerprint = op.fingerprint, result = op.result}}} end
+          if op then return {result = {conflict = {kind = 'operation', key = args.args.op.key}}} end
+          local write = args.args.ops[1]
+          if write.if_rev and write.if_rev ~= tostring(s.rev) then s.conflicts = s.conflicts + 1; return {result = {conflict = {kind = 'revision', key = 'forwards'}}} end
+          s.catalog, s.rev = write.value, s.rev + 1
           if args.args.op then s.ops[args.args.op.key] = args.args.op end
-          return {result = {revs = {forwards = '2'}}}
+          return {result = {revs = {forwards = tostring(s.rev)}}}
         end
+        if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 's'}} end
         return {result = {}}
       end
       if method == 'server.whoami' then return {principal = {kind = 'peer', pid = 4242}} end

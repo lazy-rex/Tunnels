@@ -3,7 +3,7 @@
 -- forwarded call is the same as a direct call of the same agent. No test here forwards a port:
 -- each refused tunnels.forward stops before the plugin saves anything (agent-forward.lua forwards).
 
-local exports = {'tunnels.list', 'tunnels.forward', 'tunnels.stop', 'tunnels.ports'}
+local exports = {'tunnels.list', 'tunnels.forward', 'tunnels.stop', 'tunnels.release', 'tunnels.ports'}
 
 local function client(label)
   local r = rex.call('target.resolve', {kinds = {'client'}, queries = {label}})
@@ -28,7 +28,8 @@ test('the agent face lists every export, and the plugin declares them', function
 end)
 
 test('a caller outside every pane is refused for every export', function()
-  local args = {['tunnels.list'] = {}, ['tunnels.forward'] = {key = 'k', port = 4000}, ['tunnels.stop'] = {forward = 'block:x', key = 'k'}, ['tunnels.ports'] = {}}
+  local args = {['tunnels.list'] = {}, ['tunnels.forward'] = {key = 'k', port = 4000}, ['tunnels.stop'] = {forward = 'block:x', key = 'k'},
+    ['tunnels.release'] = {profile = 'lazyrexlab-1', attempt = 'a', accept_risk = true, key = 'k'}, ['tunnels.ports'] = {}}
   for _, e in ipairs(exports) do
     expect_error(function() H.perform(plugin, e, args[e]) end, 'does not recognize this agent')
   end

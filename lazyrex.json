@@ -17,6 +17,10 @@
    "LAZYREX_TUNNELS_OPENTUNNEL": "${PLUGIN}/tests/fake-opentunnel.sh",
    "FAKE_OT_DIR": "${LAB}/fake-ot",
    "LAZYREX_TUNNELS_PROFILE_PREFIX": "lazyrexlab-"
-  }
+  },
+  "parity_fixture": "tests/parity_fixture.lua",
+  "parity_routes": [
+   "/forms/release"
+  ]
  }
 }

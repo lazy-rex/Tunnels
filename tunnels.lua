@@ -489,7 +489,8 @@ local function advance_cleanups()
       -- Otherwise the create result stays unknown: the profile stays owned. That holds for a legacy
       -- record (no fence_v) also when the plugin session is not listed: a missing session does not
       -- prove that an earlier accepted create cannot start the old script, which has no fence. Only
-      -- an explicit release by the user can end it (decision "Cleanup attempt fence", J).
+      -- an explicit release (Release reservation, tunnels.release) can end it (decision "Cleanup
+      -- attempt fence", J).
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
       -- No new attempt while the plugin session is not listed: its create would fail, and each try
       -- would leave one more attempt directory.
@@ -700,6 +701,66 @@ local function stop_forward(caller, block_id, key)
   invalidate()
   kick()
   return result
+end
+
+-- Release reservation (decision "Cleanup attempt fence", J). A legacy cleanup record (no fence_v)
+-- in phase sending has an unknown create result, and its old script has no fence: nothing proves
+-- that it can never run down. So nothing releases it automatically. The user (the form) or an
+-- agent (tunnels.release) can release it with an explicit risk acceptance. A release is no
+-- prevention: the old stop command can still run, and the result never says that it was cancelled.
+local release_warning = 'The old stop command may still run. If it runs, it stops the next forward of this profile.'
+local function release_key(caller, key)
+  return 'release/' .. (caller == 'user' and part('user') or part('agent') .. part(caller.agent)) .. part(key)
+end
+-- releasable answers whether cleanup record c is a legacy sending record of attempt key attempt.
+local function releasable(c, attempt)
+  return type(c) == 'table' and c.fence_v == nil and c.phase == 'sending' and type(c.key) == 'string' and c.key == attempt
+end
+local function release_reservation(caller, profile, attempt, accept_risk, key)
+  -- The risk acceptance is checked first: a call without it changes nothing and replays nothing.
+  if accept_risk ~= true then fail('invalid_input', 'accept_risk must be true. ' .. release_warning) end
+  if type(profile) ~= 'string' or profile == '' then fail('invalid_input', 'profile is required') end
+  if type(attempt) ~= 'string' or attempt == '' then fail('invalid_input', 'attempt is required') end
+  if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
+  local id = release_key(caller, key)
+  local fingerprint = 'release-v1/' .. part(profile) .. part(attempt)
+  local saved = hub('hub.store.op', {key = id})
+  if saved.found then return result_of(saved, fingerprint) end
+  local result = {released = true, profile = profile, attempt = attempt}
+  -- update runs the check on each read, so it holds again after a revision conflict. The record
+  -- removal and the operation result commit in one batch.
+  local ok, done = pcall(update, function(s)
+    if not releasable(s.cleanups[profile], attempt) then
+      fail('conflict', 'The reservation of ' .. profile .. ' is not the legacy attempt ' .. attempt .. ' now. Read tunnels.list again.')
+    end
+    s.cleanups[profile] = nil
+  end, {key = id, fingerprint = fingerprint, result = result})
+  if not ok then
+    -- Another invocation of the same key can have committed first.
+    local again = hub('hub.store.op', {key = id})
+    if again.found then return result_of(again, fingerprint) end
+    error(done, 0)
+  end
+  if done.op_exists then return result_of(done.op_exists, fingerprint) end
+  cleanup_errors[profile] = nil
+  invalidate()
+  kick()
+  return result
+end
+-- The release form gets the profile and the attempt in its route, as percent-encoded query values.
+local function query_value(v) return (tostring(v):gsub('[^%w%-%._~]', function(c) return string.format('%%%02X', c:byte()) end)) end
+local function release_route(profile, attempt) return '/forms/release?profile=' .. query_value(profile) .. '&attempt=' .. query_value(attempt) end
+-- release_target answers the profile and the attempt of a release form route, or nil.
+local function release_target(route)
+  local p, a = tostring(route or ''):match('^/forms/release%?profile=([^&]*)&attempt=([^&]*)$')
+  local function decode(v)
+    -- A malformed escape must not select another profile or attempt.
+    local rest = v:gsub('%%%x%x', '')
+    if rest:find('%', 1, true) or v == '' then return nil end
+    return (v:gsub('%%(%x%x)', function(hex) return string.char(tonumber(hex, 16)) end))
+  end
+  p, a = p and decode(p), a and decode(a)
+  if p and a then return p, a end
 end
 
 -- enc writes every byte outside [A-Za-z0-9-] as '_' and two hex digits, so an agent ID and key fit
@@ -914,6 +975,38 @@ local function render_form(args)
   return {title = 'Forward Port', nodes = nodes}
 end
 
+-- render_release answers the confirmation form of a legacy sending record. It names the profile and
+-- the attempt from its route and shows the warning; the checkbox is required.
+local function render_release(args)
+  local profile, attempt = release_target(args.route)
+  local nodes = {}
+  local state = profile and catalog()
+  if not profile then
+    nodes[1] = {id = 'none', type = 'widget', text = 'This form names no reservation.'}
+  elseif not releasable(state.cleanups[profile], attempt) then
+    nodes[1] = {id = 'none', type = 'widget', text = 'The reservation of ' .. profile .. ' changed. There is nothing to release here.'}
+  else
+    nodes = {
+      {id = 'profile', type = 'widget', text = 'Profile: ' .. profile},
+      {id = 'attempt', type = 'widget', text = 'Attempt: ' .. attempt},
+      {id = 'warning', type = 'widget', text = release_warning},
+      {id = 'release', type = 'form', label = 'Release reservation', fields = {
+        {id = 'accept', label = 'I accept this risk', kind = 'boolean', required = true, value = false},
+      }, submit_action = {name = 'release', label = 'Release reservation', enabled = true, tool = 'tunnels.release'}},
+    }
+  end
+  return {title = 'Release Reservation', nodes = nodes}
+end
+-- release_form is the form submit (view path). The checkbox is checked before anything else.
+local function release_form(args)
+  local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
+  if values.accept ~= true then fail('invalid_input', 'Check "I accept this risk" to release the reservation. ' .. release_warning) end
+  local profile, attempt = release_target(args.route)
+  if not profile then fail('invalid_input', 'This form names no reservation') end
+  local result = release_reservation('user', profile, attempt, true, args.operation_key)
+  return {released = result.released, profile = result.profile, attempt = result.attempt, close_form = true}
+end
+
 -- Rex sends no event while opentunnel starts or reconnects, so the panel renders again on a timer
 -- while forwards exist: every 2 s until each one is connected, then every 15 s.
 local refresh_timer
@@ -959,8 +1052,15 @@ local function render_panel()
   if cok then for profile in pairs(state.cleanups) do pending[#pending + 1] = profile end end
   table.sort(pending)
   for _, profile in ipairs(pending) do
-    nodes[#nodes + 1] = {id = 'cleanup/' .. profile, type = 'widget', text = 'Stopping the opentunnel service of ' .. profile
+    local c = state.cleanups[profile]
+    local node = {id = 'cleanup/' .. profile, type = 'widget', text = 'Stopping the opentunnel service of ' .. profile
       .. (cleanup_errors[profile] and (' (failed, retrying: ' .. cleanup_errors[profile] .. ')') or '')}
+    if releasable(c, type(c) == 'table' and c.key) then
+      -- Only an explicit release ends a legacy sending record.
+      node.text = 'Stopping the opentunnel service of ' .. profile .. ': an older stop has an unknown start result. The port stays reserved.'
+      node.action = {name = 'release', label = 'Release reservation…', enabled = true, user_only = 'navigation'}
+    end
+    nodes[#nodes + 1] = node
   end
   if #rows == 0 and #pending == 0 and ok then nodes[#nodes + 1] = {id = 'empty', type = 'widget', text = 'No ports are forwarded.'} end
   if #rows > 0 or #pending > 0 then arm_refresh((running < #rows or #pending > 0) and 2 or 15) end
@@ -986,8 +1086,13 @@ local function list_tunnels()
         logs_shown = row.block ~= nil and row.block.placement ~= 'detached'}
     end
   end
-  local cleanups = {}
-  for profile in pairs(catalog().cleanups) do cleanups[#cleanups + 1] = {profile = profile, error = cleanup_errors[profile]} end
+  local cleanups, records = {}, catalog().cleanups
+  for profile, c in pairs(records) do
+    c = type(c) == 'table' and c or {}
+    -- legacy: an attempt of an older plugin (no fence). releasable: tunnels.release can end it.
+    cleanups[#cleanups + 1] = {profile = profile, error = cleanup_errors[profile], phase = c.phase, key = c.key,
+      legacy = c.key ~= nil and c.fence_v == nil, releasable = releasable(c, c.key)}
+  end
   table.sort(cleanups, function(a, b) return a.profile < b.profile end)
   return {forwards = forwards, pending = pending, cleanups = cleanups}
 end
@@ -1012,6 +1117,7 @@ end
 local function render(args)
   if args.route == '/panels/tunnels' then return render_panel() end
   if args.route == '/forms/forward' then return render_form(args) end
+  if args.route == '/forms/release' or tostring(args.route):sub(1, 15) == '/forms/release?' then return render_release(args) end
   fail('not_found', 'Unknown route')
 end
 local function perform(args)
@@ -1022,7 +1128,14 @@ local function perform(args)
     invalidate()
     return {}
   end
+  if tostring(args.route):sub(1, 15) == '/forms/release?' and args.node_id == 'release' and args.action == 'release' then return release_form(args) end
   if args.route == '/panels/tunnels' and args.node_id == 'new' then return {form = '/forms/forward'} end
+  local cleanup = args.route == '/panels/tunnels' and type(args.node_id) == 'string' and args.node_id:match('^cleanup/(.+)$')
+  if cleanup and args.action == 'release' then
+    local c = catalog().cleanups[cleanup]
+    if not releasable(c, type(c) == 'table' and c.key) then fail('conflict', 'The reservation of ' .. cleanup .. ' cannot be released now') end
+    return {form = release_route(cleanup, c.key)}
+  end
   if args.route == '/panels/tunnels' then return panel_action(args) end
   fail('invalid_input', 'Unknown Tunnels action')
 end
@@ -1038,7 +1151,7 @@ local handlers = {
 -- "Agents may act on anything" and "Agents use the Tunnels plugin fully").
 local agent_actions = {
   {name = 'tunnels.list', kind = 'client', title = 'List forwarded ports',
-    description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups). Empty lists can appear as {}.',
+    description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups: profile, phase, key, error; legacy = an attempt of an older plugin version; releasable = tunnels.release can end its reservation). Empty lists can appear as {}.',
     args = {type = 'object', properties = {}, additionalProperties = false}},
   {name = 'tunnels.forward', kind = 'client', title = 'Forward a port to a public URL',
     description = 'Forward a local TCP port to a public opentunnel URL. The port becomes public: anyone with the URL can reach it, and the tunnel does not ask visitors to sign in. '
@@ -1056,6 +1169,16 @@ local agent_actions = {
     description = 'Stop a forward from tunnels.list (forward = its id), also one that the user or another agent started. Choose a key and retry with the same content after an unknown outcome.',
     args = {type = 'object', properties = {forward = {type = 'string', minLength = 1}, key = {type = 'string', minLength = 1}},
       required = {'forward', 'key'}, additionalProperties = false}},
+  {name = 'tunnels.release', kind = 'client', title = 'Release the reservation of an older stop',
+    description = 'Release a port that a cleanup of an older plugin version keeps reserved: a tunnels.list cleanup with releasable = true. '
+      .. 'Give its profile and its key as attempt, and accept_risk = true. ' .. release_warning
+      .. ' The release does not cancel that command. Choose a key and retry with the same content after an unknown outcome.',
+    args = {type = 'object', properties = {
+      profile = {type = 'string', minLength = 1},
+      attempt = {type = 'string', minLength = 1, description = 'The key of the cleanup in tunnels.list.'},
+      accept_risk = {type = 'boolean', description = 'Must be true.'},
+      key = {type = 'string', minLength = 1}},
+      required = {'profile', 'attempt', 'accept_risk', 'key'}, additionalProperties = false}},
   {name = 'tunnels.ports', kind = 'client', title = 'Scan listening ports',
     description = 'Scan the listening TCP ports of processes in Rex panes, with the given session (default: yours) first. It refreshes the scan that the Forward Port form shows and changes nothing else, so it takes no key. Empty lists can appear as {}.',
     args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
@@ -1075,6 +1198,7 @@ local function agent_call(name, principal, args)
   if name == 'tunnels.list' then return list_tunnels() end
   if name == 'tunnels.forward' then return agent_forward(caller, session_id, block_id, args) end
   if name == 'tunnels.stop' then return stop_forward(caller, args.forward, args.key) end
+  if name == 'tunnels.release' then return release_reservation(caller, args.profile, args.attempt, args.accept_risk, args.key) end
   if name == 'tunnels.ports' then return ports_for(session_id, args) end
   fail('not_supported', 'Unknown Tunnels action')
 end
