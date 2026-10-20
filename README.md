@@ -70,15 +70,26 @@ lazyrex-hub test
 The shared LazyRex renderer tests (view package) cover the generic keyboard, focus and screen
 behavior of the forms and panels.
 
-### Known issue: one unexplained stop.lua failure
+### Known issue: stop.lua count failures
 
-During the port, one run of `tests/stop.lua` failed once on a count check (the second count). The
-cause is not known. That run kept no lab, so nobody could inspect it.
+During the port, one run of `tests/stop.lua` failed once on a count check (the second count). That
+run kept no lab, so nobody could inspect it. Its cause is still not known.
 
-- Suspected cause (not proven): the old test helper turned a failed read into 0.
-- Commit 3f76a4a makes the helper strict and adds helper tests. If the failure occurs again, the
-  helper reports its cause.
-- The failure did not occur again in more than 30 later runs (status at 7b65510).
+A later failure has a credible cause (observed on Rex 0.0.1792158932-g88fd41, lab, 2026-10-19: 1
+failure in 11 runs at HEAD 0499236). The runs used a mutable checkout, so they were not isolated;
+the source identity rests on the implementer's timeline. The test "an agent stops a user forward, ..." counted 2
+cleanup `down` runs for one forward, not 1. The strict helper (3f76a4a) read the count correctly.
+
+- Cause (inferred from the order of record revisions in the hub log; the log has no record
+  content): the test changes the `forwards` record with a read, a change and `write()`. `write()`
+  has no revision check (LazyRex `docs/testing.md`). A plugin commit came between the read and the
+  write, so the write probably put back an old cleanup record, and the plugin ran `down` again.
+- The unconditional test write can overwrite concurrent plugin changes; this is the suspected cause
+  of this failure. The log does not show what the write overwrote, so a plugin defect is not ruled
+  out.
+- The same read-change-write pattern is in `tests/stop.lua`, `tests/errors.lua`, `tests/recovery.lua`
+  and `tests/agent-forward.lua`. The fix needs a revision-checked test write from the LazyRex
+  harness (requested).
 
 If `tests/stop.lua` fails on a count, keep the lab (`lazyrex-hub test -keep`) and record the helper
-error here.
+error and the order of `hub.test.store`, `hub.store.batch` and `hub.test.write` in `hub.log` here.
