@@ -12,7 +12,7 @@ local S = session('tunnels-work')
 local P = T.port()
 local web = T.listen(S, P, 'web')
 T.listening(P)
--- shared.shared.tblock: the tunnel block that the first test makes. A table field: in Rex Lua a closure's
+-- shared.tblock: the tunnel block that the first test makes. A table field: in Rex Lua a closure's
 -- write to a captured local can be lost after a caught error
 -- (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
 local shared = {}
