@@ -283,7 +283,7 @@ local function advance_cleanups()
         end
         if c.result then
           -- A table field, not a local: in Rex Lua a closure's write to a captured local can be lost
-          -- after a caught error (observed on Rex 0.0.1792158932-g88fd41).
+          -- after a caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
           local result, done = c.result, {saved = false}
           update(function(s)
             local x = s.cleanups[profile]

@@ -13,7 +13,8 @@ local P = T.port()
 local web = T.listen(S, P, 'web')
 T.listening(P)
 -- shared.shared.tblock: the tunnel block that the first test makes. A table field: in Rex Lua a closure's
--- write to a captured local can be lost after a caught error.
+-- write to a captured local can be lost after a caught error
+-- (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
 local shared = {}
 
 test('the form lists the pane port first; Forward starts one detached block and opens the panel', function()

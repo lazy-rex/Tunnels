@@ -37,9 +37,9 @@ test('count_lines: an exec failure or output that is not one number raises', fun
 end)
 
 test('state from a wait callback survives a caught error: return value and table field', function()
-  -- Rex Lua 0.0.1792158932-g88fd41 (lab): after a pcall catches an error, a closure created before
-  -- the catch writes a detached copy of a captured local. wait() runs its callback in a pcall, so a
-  -- callback that fails once must give its state by a return value or a table field.
+  -- After a caught error, a closure created before the catch writes a detached copy of a captured
+  -- local (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). wait() runs its callback in a pcall,
+  -- so a callback gives its state by its return value or a table field (docs/testing.md, "Waiting").
   local seen = {polls = 0, last = nil}
   local got = wait('the second poll', function()
     seen.polls = seen.polls + 1

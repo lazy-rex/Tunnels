@@ -16,7 +16,7 @@ test('lsof parsing: addresses, duplicate sockets, invalid ports', function()
 end)
 
 -- A table field, not a local: in Rex Lua a closure's write to a captured local can be lost after a
--- caught error (observed on Rex 0.0.1792158932-g88fd41).
+-- caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
 local count = {n = 0}
 local function fixture(mode)
   local api = {}

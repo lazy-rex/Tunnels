@@ -250,7 +250,8 @@ test('T.edit keeps a plugin commit that comes between its read and its write', f
   local p = port()
   local f = seed(p, 'alice')
   -- The count is a table field: Rex Lua detaches a local that a closure captured before a caught
-  -- error (T.edit catches the conflict), so a plain local would read 1 here.
+  -- error (T.edit catches the conflict; LazyRex docs/rex-protocol.md, "Rex Lua runtime"), so a
+  -- plain local would read 1 here.
   local calls = {n = 0}
   T.edit(function(value) calls.n = calls.n + 1; value.test_marker = 'edit-' .. p end, function()
     -- A plugin commit between the read and the write: the stop removes the forward.

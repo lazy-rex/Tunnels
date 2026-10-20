@@ -52,9 +52,9 @@ return function(E, tests_dir)
   -- edit changes the forwards record as another writer: it reads the value and its revision, calls
   -- f(value), and writes the value back with that revision (if_rev). A plugin commit in between
   -- makes the write fail with conflict; then edit reads again and calls f again on the fresh
-  -- value, so f must only change the value it gets. Other errors raise. Rex Lua 0.0.1792158932-g88fd41
-  -- (lab): a local that f captured and changes reads stale in the caller after a caught conflict;
-  -- keep such state in a table field. between (tests of edit
+  -- value, so f must only change the value it gets. Other errors raise. A local that f captured and
+  -- changes can read stale in the caller after the caught conflict (LazyRex docs/rex-protocol.md,
+  -- "Rex Lua runtime"); keep such state in a table field. between (tests of edit
   -- only) runs after the first read and before the first write. It answers the written value.
   function T.edit(f, between)
     for attempt = 1, 10 do

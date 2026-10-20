@@ -31,7 +31,8 @@ local function stop(id, who) return (who or alice):call('tunnels.stop', {forward
 local function entries(r, p) local list = {}; for _, x in ipairs(r.ports or {}) do if x.port == p then list[#list + 1] = x end end; return list end
 local function save(f) T.edit(function(v) v.intents = v.intents or {}; v.cleanups = v.cleanups or {}; v.stops = v.stops or {}; f(v) end) end
 -- ids.alice is the agent ID that the hub gives alice (the creator of her forwards). A table field:
--- in Rex Lua a closure's write to a captured local can be lost after a caught error.
+-- in Rex Lua a closure's write to a captured local can be lost after a caught error (LazyRex
+-- docs/rex-protocol.md, "Rex Lua runtime").
 local ids = {}
 
 test('a failed intent save starts no block and saves no intent; the key then works', function()
