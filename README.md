@@ -126,14 +126,20 @@ cleanup `down` runs for one forward, not 1. The strict helper (3f76a4a) read the
 
 - Cause (inferred from the order of record revisions in the hub log; the log has no record
   content): the test changes the `forwards` record with a read, a change and `write()`. `write()`
-  has no revision check (LazyRex `docs/testing.md`). A plugin commit came between the read and the
+  had no revision check then. A plugin commit came between the read and the
   write, so the write probably put back an old cleanup record, and the plugin ran `down` again.
 - The unconditional test write can overwrite concurrent plugin changes; this is the suspected cause
   of this failure. The log does not show what the write overwrote, so a plugin defect is not ruled
   out.
-- The same read-change-write pattern is in `tests/stop.lua`, `tests/errors.lua`, `tests/recovery.lua`
-  and `tests/agent-forward.lua`. The fix needs a revision-checked test write from the LazyRex
-  harness (requested).
+- The same read-change-write pattern was in `tests/stop.lua`, `tests/errors.lua`, `tests/recovery.lua`
+  and `tests/agent-forward.lua`. Fixed (3a39937): every such test write now goes through `T.edit`,
+  which writes with the revision it read (`if_rev`, LazyRex hub 415a612 and later). After a
+  conflict it reads the fresh record and applies the change again.
+
+After the fix, `tests/stop.lua` passed 50 of 50 runs (observed on Rex 0.0.1792158932-g88fd41, lab,
+2026-10-19). Each run started its own lab from a read-only `git archive` of Tunnels bff992b, with
+the LazyRex hub at 6f68bcc. Short probe labs ran in parallel during runs 18 to 24. This result
+does not show that the first failure (the one without a lab) had the same cause.
 
 If `tests/stop.lua` fails on a count, keep the lab (`lazyrex-hub test -keep`) and record the helper
 error and the order of `hub.test.store`, `hub.store.batch` and `hub.test.write` in `hub.log` here.
