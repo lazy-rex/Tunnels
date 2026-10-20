@@ -15,7 +15,9 @@ test('lsof parsing: addresses, duplicate sockets, invalid ports', function()
   expect(rows[3].port).to_be(5000)
 end)
 
-local calls = 0
+-- A table field, not a local: in Rex Lua a closure's write to a captured local can be lost after a
+-- caught error (observed on Rex 0.0.1792158932-g88fd41).
+local count = {n = 0}
 local function fixture(mode)
   local api = {}
   function api.call(method)
@@ -30,7 +32,7 @@ local function fixture(mode)
     error(method)
   end
   function api.exec(argv)
-    calls = calls + 1
+    count.n = count.n + 1
     if argv[1] == '/bin/ps' then
       if mode == 'ps_error' then return {ok = false, stderr = 'denied'} end
       if mode == 'no_pids' then return {ok = true, stdout = '20 1 other\n'} end
@@ -59,10 +61,10 @@ test('scan: descendant filtering, cycle termination, partial failures, empty sel
   r = ports.scan('s', fixture('empty'))
   expect(#r.ports).to_be(0)
   expect(#r.warnings).to_be(0)
-  calls = 0
+  count.n = 0
   r = ports.scan('s', fixture('no_pids'))
   expect(#r.ports).to_be(0)
-  expect(calls, 'no lsof call without selected PIDs').to_be(1)
+  expect(count.n, 'no lsof call without selected PIDs').to_be(1)
 end)
 
 -- --- The real plugin on the lab server ---

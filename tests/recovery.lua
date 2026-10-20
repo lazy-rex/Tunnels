@@ -284,16 +284,17 @@ end)
 -- that attempt: it goes to retry with the error. Any other create error can follow a create, so the
 -- attempt stays sending (unknown result) and keeps the profile.
 local function create_cleanup_sandbox(err)
-  local s
-  s = load_sandbox(T.plugin_dir, base, {
+  -- The stub appends to a table made before it (not through s, which is assigned later).
+  local calls = {}
+  local s = load_sandbox(T.plugin_dir, base, {
     vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
     catalog = {cleanups = {['lazyrexlab-4321'] = {phase = 'new'}}},
     rex = {
       ['session.list'] = function() return {sessions = {{session_id = 'plugin'}, {session_id = 's'}}} end,
       ['session.list_blocks'] = function(a) return {blocks = a.session_id == 's' and {{block_id = 'src', placement = 'placed'}} or {}} end,
-      ['session.new_block'] = function(a) s.calls[#s.calls + 1] = a; return nil, err end,
+      ['session.new_block'] = function(a) calls[#calls + 1] = a; return nil, err end,
     }})
-  s.calls = {}
+  s.calls = calls
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
   return s
 end

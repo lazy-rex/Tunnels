@@ -12,7 +12,9 @@ local S = session('tunnels-work')
 local P = T.port()
 local web = T.listen(S, P, 'web')
 T.listening(P)
-local tblock
+-- shared.shared.tblock: the tunnel block that the first test makes. A table field: in Rex Lua a closure's
+-- write to a captured local can be lost after a caught error.
+local shared = {}
 
 test('the form lists the pane port first; Forward starts one detached block and opens the panel', function()
   local form = T.open_form(web)
@@ -24,11 +26,11 @@ test('the form lists the pane port first; Forward starts one detached block and 
   local op = T.submit(form, select.options[1].value)
   expect(op.status).to_be('succeeded')
   local blocks = wait('one tunnel block', function() local b = T.tunnel_blocks(S); return #b == 1 and b end, 20)
-  tblock = blocks[1].block_id
+  shared.tblock = blocks[1].block_id
   expect(blocks[1].placement).to_be('detached')
   local cat = T.catalog()
   expect((next(cat.intents or {}))).to_be(nil)
-  local fw = cat.forwards[tblock]
+  local fw = cat.forwards[shared.tblock]
   expect(fw.session_id).to_be(S)
   expect(fw.source_block).to_be(web.block)
   expect(fw.port).to_be(P)
@@ -41,11 +43,11 @@ end)
 test('the panel and tunnels.list show Connected with the URL', function()
   local v = T.panel(S)
   local label = wait('Connected with a URL', function()
-    local row = T.row(v, 'fw/' .. tblock)
+    local row = T.row(v, 'fw/' .. shared.tblock)
     return row and row.label:match('^Port ' .. P .. ' · Connected · https://') and row.label
   end, 40)
   local f = T.forward_of(P, alice)
-  expect(f.id).to_be(tblock)
+  expect(f.id).to_be(shared.tblock)
   expect(f.state).to_be('Connected')
   expect(f.url).to_match('^https://lazyrexlab%-' .. P .. '%-%d+%.fake%.invalid$')
   expect(label).to_contain(f.url)
@@ -57,34 +59,34 @@ end)
 
 test('Show Logs places the block beside the source pane; Hide Logs detaches it; a repeated Show changes nothing', function()
   local v = T.panel(S)
-  expect(T.row(v, 'fw/' .. tblock).items[1].id).to_be('show')
-  expect(v:action('fw/' .. tblock, 'show', {item_id = 'show'}).status).to_be('succeeded')
-  local b = wait('the block is placed', function() local x = T.blocks(S)[tblock]; return x and x.placement == 'placed' and x end, 10)
+  expect(T.row(v, 'fw/' .. shared.tblock).items[1].id).to_be('show')
+  expect(v:action('fw/' .. shared.tblock, 'show', {item_id = 'show'}).status).to_be('succeeded')
+  local b = wait('the block is placed', function() local x = T.blocks(S)[shared.tblock]; return x and x.placement == 'placed' and x end, 10)
   expect(b.window_id).to_be(web.window)
-  expect(T.row(v, 'fw/' .. tblock).items[1].id).to_be('hide')
+  expect(T.row(v, 'fw/' .. shared.tblock).items[1].id).to_be('hide')
   expect(T.forward_of(P, alice).logs_shown).to_be(true)
   -- A repeat of Show (a retry after a lost reply) does not move the block again.
-  expect(v:action('fw/' .. tblock, 'show', {item_id = 'show'}).status).to_be('succeeded')
-  expect(T.blocks(S)[tblock].placement).to_be('placed')
-  expect(v:action('fw/' .. tblock, 'hide', {item_id = 'hide'}).status).to_be('succeeded')
-  wait('the block is detached', function() return T.blocks(S)[tblock].placement == 'detached' end, 10)
-  expect(T.row(v, 'fw/' .. tblock).items[1].id).to_be('show')
+  expect(v:action('fw/' .. shared.tblock, 'show', {item_id = 'show'}).status).to_be('succeeded')
+  expect(T.blocks(S)[shared.tblock].placement).to_be('placed')
+  expect(v:action('fw/' .. shared.tblock, 'hide', {item_id = 'hide'}).status).to_be('succeeded')
+  wait('the block is detached', function() return T.blocks(S)[shared.tblock].placement == 'detached' end, 10)
+  expect(T.row(v, 'fw/' .. shared.tblock).items[1].id).to_be('show')
   expect(#T.tunnel_blocks(S)).to_be(1)
 end)
 
 test('a plugin restart keeps the forward and starts no second tunnel', function()
   T.restart()
   local v = T.panel(S)
-  wait('Connected after the restart', function() local r = T.row(v, 'fw/' .. tblock); return r and r.label:find('Connected', 1, true) end, 20)
+  wait('Connected after the restart', function() local r = T.row(v, 'fw/' .. shared.tblock); return r and r.label:find('Connected', 1, true) end, 20)
   expect(#T.tunnel_blocks(S)).to_be(1)
   local ids = {}
   for id in pairs(T.catalog().forwards) do ids[#ids + 1] = id end
-  expect(ids).to_equal({tblock})
+  expect(ids).to_equal({shared.tblock})
 end)
 
 test('Stop from the panel empties the panel and the list', function()
   local v = T.panel(S)
-  expect(v:action('fw/' .. tblock, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
+  expect(v:action('fw/' .. shared.tblock, 'stop', {item_id = 'stop'}).status).to_be('succeeded')
   wait('no tunnel block', function() return #T.tunnel_blocks(S) == 0 end, 10)
   wait('the panel is empty', function() return T.row(v, 'empty') ~= nil end, 10)
   expect((next(T.list(alice).forwards or {}))).to_be(nil)

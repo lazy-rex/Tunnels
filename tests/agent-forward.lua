@@ -30,8 +30,9 @@ end
 local function stop(id, who) return (who or alice):call('tunnels.stop', {forward = id, key = 'stop-' .. id}) end
 local function entries(r, p) local list = {}; for _, x in ipairs(r.ports or {}) do if x.port == p then list[#list + 1] = x end end; return list end
 local function save(f) T.edit(function(v) v.intents = v.intents or {}; v.cleanups = v.cleanups or {}; v.stops = v.stops or {}; f(v) end) end
--- alice_name is the agent ID that the hub gives alice (the creator of her forwards).
-local alice_name
+-- ids.alice is the agent ID that the hub gives alice (the creator of her forwards). A table field:
+-- in Rex Lua a closure's write to a captured local can be lost after a caught error.
+local ids = {}
 
 test('a failed intent save starts no block and saves no intent; the key then works', function()
   local p = T.port()
@@ -44,8 +45,8 @@ test('a failed intent save starts no block and saves no intent; the key then wor
   expect((next(T.catalog().intents or {}))).to_be(nil)
   local r = alice:call('tunnels.forward', {key = 'save-fails', port = p, session_id = S})
   expect(r.port).to_be(p)
-  alice_name = T.catalog().forwards[r.forward].creator.agent
-  assert_true(type(alice_name) == 'string' and alice_name ~= '', 'the forward names its agent')
+  ids.alice = T.catalog().forwards[r.forward].creator.agent
+  assert_true(type(ids.alice) == 'string' and ids.alice ~= '', 'the forward names its agent')
   expect(stop(r.forward).stopped).to_be(true)
   T.no_cleanup_for(p)
 end)
@@ -64,10 +65,10 @@ test('a source from tunnels.ports forwards that listener; the key replays, also 
   expect(r.source_block).to_be(web.block)
   expect(r.state).to_be('starting')
   local fw = T.catalog().forwards[r.forward]
-  expect(fw.creator).to_equal({kind = 'agent', agent = alice_name})
-  expect(fw.op).to_be(agent_id(alice_name, 'src-1'))
-  expect(T.blocks(S)[r.forward].label).to_be(label_of(agent_id(alice_name, 'src-1')))
-  expect(T.forward_of(p).created_by).to_be(alice_name)
+  expect(fw.creator).to_equal({kind = 'agent', agent = ids.alice})
+  expect(fw.op).to_be(agent_id(ids.alice, 'src-1'))
+  expect(T.blocks(S)[r.forward].label).to_be(label_of(agent_id(ids.alice, 'src-1')))
+  expect(T.forward_of(p).created_by).to_be(ids.alice)
   -- Same key and content: the saved result, no second block.
   expect(alice:call('tunnels.forward', {key = 'src-1', source = found[1].source})).to_equal(r)
   expect(#T.tunnel_blocks(S)).to_be(1)
@@ -139,7 +140,7 @@ test('a 100-character key with punctuation is valid', function()
   local key = string.sub(string.rep([[ /:'"%|.-_\]], 10), 1, 100)
   expect(#key).to_be(100)
   local r = alice:call('tunnels.forward', {key = key, port = p, session_id = S})
-  local id = agent_id(alice_name, key)
+  local id = agent_id(ids.alice, key)
   assert_true(#id > 113, 'the ID is longer than a label can hold')
   expect(T.catalog().forwards[r.forward].op).to_be(id)
   expect(T.blocks(S)[r.forward].label).to_be(label_of(id))
@@ -184,11 +185,11 @@ test('an agent intent with an unknown create result keeps its saved target and i
   local p = T.port()
   -- A source for a listener that does not exist now: recovery never rescans.
   local source = S .. '|' .. pane.block .. '|' .. p .. '|[::1]'
-  local id = agent_id(alice_name, 'unknown-1')
+  local id = agent_id(ids.alice, 'unknown-1')
   save(function(v)
     v.intents[id] = {session_id = S, source_block = pane.block, port = p, target = '[::1]:' .. p, profile = T.prefix .. p,
       fingerprint = 'forward-agent-v1/' .. part('source') .. part(source), created = os.date('!%Y-%m-%dT%H:%M:%SZ'),
-      saved_at = os.time() - 1, phase = 'sending', creator = {kind = 'agent', agent = alice_name}}
+      saved_at = os.time() - 1, phase = 'sending', creator = {kind = 'agent', agent = ids.alice}}
   end)
   -- Before the block exists: unresolved, and the port stays reserved.
   expect_error(function() alice:call('tunnels.forward', {key = 'unknown-1', source = source}) end, 'unresolved')
@@ -200,7 +201,7 @@ test('an agent intent with an unknown create result keeps its saved target and i
     return ok and x
   end, 15)
   expect(r).to_equal({forward = b, port = p, target = '[::1]:' .. p, session_id = S, source_block = pane.block, state = 'starting'})
-  expect(T.catalog().forwards[b].creator).to_equal({kind = 'agent', agent = alice_name})
+  expect(T.catalog().forwards[b].creator).to_equal({kind = 'agent', agent = ids.alice})
   expect(alice:call('tunnels.forward', {key = 'unknown-1', source = source})).to_equal(r)
   expect(stop(b).stopped).to_be(true)
   T.no_cleanup_for(p)
@@ -209,10 +210,10 @@ end)
 test('a legacy user operation key that looks like an agent key is not an agent operation', function()
   local p = T.port()
   -- Legacy user keys have no '/'. This one spells the agent framing with other separators.
-  put_operation{key = 'fwd.' .. #alice_name .. ':' .. enc(alice_name) .. '.6:legacy.', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
+  put_operation{key = 'fwd.' .. #ids.alice .. ':' .. enc(ids.alice) .. '.6:legacy.', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
   local r = alice:call('tunnels.forward', {key = 'legacy', port = p, session_id = S})
   expect(r.port).to_be(p)
-  expect(T.catalog().forwards[r.forward].op).to_be(agent_id(alice_name, 'legacy'))
+  expect(T.catalog().forwards[r.forward].op).to_be(agent_id(ids.alice, 'legacy'))
   expect(stop(r.forward).stopped).to_be(true)
   T.no_cleanup_for(p)
 end)

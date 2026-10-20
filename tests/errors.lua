@@ -32,10 +32,9 @@ test('a refused store write ends the view operation with the hub code; the next 
   local v = T.open_panel(pane)
   wait('the row', function() return T.row(v, 'fw/' .. b) end, 10)
   quiet()
-  local op
-  with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
+  local op = with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
     local _, key = v:admit('action', {node_id = 'fw/' .. b, action = 'stop', input = {item_id = 'stop'}})
-    op = v:settle(key, 10)
+    return v:settle(key, 10)
   end)
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('injected_failure')
@@ -131,8 +130,8 @@ local function create_sandbox(create)
 end
 
 test('a definite Rex refusal of the tunnel create ends the Forward with its code and keeps no intent (sandbox)', function()
-  local calls = 0
-  local s = create_sandbox(function() calls = calls + 1; return nil, rex_text('input: validating: label must be at most 128 characters', 400, 'bad_request') end)
+  local calls = {n = 0}
+  local s = create_sandbox(function() calls.n = calls.n + 1; return nil, rex_text('input: validating: label must be at most 128 characters', 400, 'bad_request') end)
   local reply = form_forward(s, 'refused-create', 4321)
   assert_true(reply.error, 'Forward fails')
   expect(reply.error.code).to_be('bad_request')
@@ -142,7 +141,7 @@ test('a definite Rex refusal of the tunnel create ends the Forward with its code
   -- The key replays the refusal; it never creates again.
   local again = form_forward(s, 'refused-create', 4321)
   expect(again.error.code).to_be('bad_request')
-  expect(calls, 'one create').to_be(1)
+  expect(calls.n, 'one create').to_be(1)
 end)
 
 test('a create error other than a validation refusal keeps the intent as an unknown result (sandbox)', function()
@@ -165,16 +164,16 @@ test('a table bad_request is a refusal too (sandbox)', function()
 end)
 
 test('an internal error after a real create keeps the reservation; the retry adopts the block with proof (sandbox)', function()
-  local created, calls = false, 0
+  local st = {created = false, calls = 0}
   local s = load_sandbox(T.plugin_dir, base, {
     vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
     -- ps shows the run script with the key, started one second ago.
     ps = function() return {ok = true, stdout = '   00:01 /bin/sh ' .. T.plugin_dir .. '/tunnels-run.sh internal-1 ' .. T.fixture .. ' lazyrexlab-4321 127.0.0.1:4321\n'} end,
     rex = {
       -- Rex creates the block, then answers internal.
-      ['session.new_block'] = function() calls = calls + 1; created = true; return nil, rex_text('crash after create', 500, 'internal') end,
+      ['session.new_block'] = function() st.calls = st.calls + 1; st.created = true; return nil, rex_text('crash after create', 500, 'internal') end,
       ['session.list_blocks'] = function()
-        return {blocks = created and {{block_id = 'b1', label = 'lazyrex-tunnel:internal-1', placement = 'detached'}} or {}}
+        return {blocks = st.created and {{block_id = 'b1', label = 'lazyrex-tunnel:internal-1', placement = 'detached'}} or {}}
       end,
       ['com.superlogical.terminal.process'] = function() return {child = {pid = 77}} end,
     }})
@@ -186,5 +185,5 @@ test('an internal error after a real create keeps the reservation; the retry ado
   expect(again.result).to_equal({panel = {command = 'tunnels'}})
   expect(s.catalog.forwards.b1.port).to_be(4321)
   expect((next(s.catalog.intents or {}))).to_be(nil)
-  expect(calls, 'no second create').to_be(1)
+  expect(st.calls, 'no second create').to_be(1)
 end)
