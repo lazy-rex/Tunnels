@@ -15,11 +15,11 @@ local pane = T.shell(S, 'work')
 local function seed(p)
   local b = rex.call('session.new_block', {session_id = S, flavor = 'com.superlogical.terminal.shell',
     label = 'lazyrex-tunnel:seed-' .. p, options = {command = {'/bin/sleep', '600'}, login = false, exit = {on_completion = false}}}).block_id
-  local value = T.catalog()
-  value.forwards = value.forwards or {}
-  value.forwards[b] = {session_id = S, source_block = pane.block, port = p, target = '127.0.0.1:' .. p, profile = T.prefix .. p,
+  T.edit(function(value)
+    value.forwards = value.forwards or {}
+    value.forwards[b] = {session_id = S, source_block = pane.block, port = p, target = '127.0.0.1:' .. p, profile = T.prefix .. p,
     op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = {kind = 'agent', agent = 'alice'}}
-  write({{key = 'forwards', value = value}})
+  end)
   return b
 end
 local function quiet()

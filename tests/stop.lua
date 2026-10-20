@@ -47,12 +47,12 @@ end
 local function seed(p, agent_id, extra)
   local b = rex.call('session.new_block', {session_id = S, flavor = 'com.superlogical.terminal.shell',
     label = 'lazyrex-tunnel:seed-' .. p, options = {command = {'/bin/sleep', '600'}, login = false, exit = {on_completion = false}}})
-  local value = catalog()
-  value.forwards = value.forwards or {}
-  value.forwards[b.block_id] = {session_id = S, source_block = source, port = p, target = '127.0.0.1:' .. p, profile = 'lazyrexlab-' .. p,
+  T.edit(function(value)
+    value.forwards = value.forwards or {}
+    value.forwards[b.block_id] = {session_id = S, source_block = source, port = p, target = '127.0.0.1:' .. p, profile = 'lazyrexlab-' .. p,
     op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = agent_id and {kind = 'agent', agent = agent_id} or nil}
-  for k, v in pairs(extra or {}) do value[k] = v end
-  write({{key = 'forwards', value = value}})
+    for k, v in pairs(extra or {}) do value[k] = v end
+  end)
   return b.block_id
 end
 
@@ -101,9 +101,7 @@ test('an agent stops a user forward, a forward without a creator and one with a 
   expect(alice:call('tunnels.stop', {forward = legacy, key = 'legacy-fw'})).to_equal({forward = legacy, stopped = true})
   expect(blocks()[legacy]).to_be(nil)
   local malformed = seed(p3)
-  local value = catalog()
-  value.forwards[malformed].creator = {kind = 'agent', agent = ''}
-  write({{key = 'forwards', value = value}})
+  T.edit(function(value) value.forwards[malformed].creator = {kind = 'agent', agent = ''} end)
   expect(bob:call('tunnels.stop', {forward = malformed, key = 'malformed-fw'})).to_equal({forward = malformed, stopped = true})
   expect(blocks()[malformed]).to_be(nil)
   for _, p in ipairs({p1, p2, p3}) do no_cleanup_for(p) end
@@ -178,11 +176,11 @@ local function tunnel_count() local n = 0; for _, b in pairs(blocks()) do if (b.
 test('two saved stops of one forward both finish through the plugin; one cleanup; both keys replay after reuse', function()
   local p = port()
   local f = seed(p, 'alice')
-  local value = catalog()
-  value.stops = value.stops or {}
-  value.stops[stop_key('alice', 'both-a')] = saved_stop(f, p)
-  value.stops[stop_key('bob', 'both-b')] = saved_stop(f, p)
-  write({{key = 'forwards', value = value}})
+  T.edit(function(value)
+    value.stops = value.stops or {}
+    value.stops[stop_key('alice', 'both-a')] = saved_stop(f, p)
+    value.stops[stop_key('bob', 'both-b')] = saved_stop(f, p)
+  end)
   panel() -- a render kicks maintenance
   wait('both stops finish', function() return next(catalog().stops or {}) == nil end, 15)
   expect(blocks()[f]).to_be(nil)
@@ -205,11 +203,11 @@ test('a stop that finishes after another keeps the port reserved and adds no sec
   -- Bob's final batch fails ten times (one per maintenance pass, about one per second), so his
   -- saved stop outlives Alice's; then it finishes through finish_stop with the forward gone.
   inject({match = {op_key = kb}, fail = 'held', times = 10})
-  local value = catalog()
-  value.stops = value.stops or {}
-  value.stops[ka] = saved_stop(f, p)
-  value.stops[kb] = saved_stop(f, p)
-  write({{key = 'forwards', value = value}})
+  T.edit(function(value)
+    value.stops = value.stops or {}
+    value.stops[ka] = saved_stop(f, p)
+    value.stops[kb] = saved_stop(f, p)
+  end)
   panel()
   wait('Alice\'s stop finishes', function() return (catalog().stops or {})[ka] == nil end, 15)
   expect(blocks()[f]).to_be(nil)
@@ -234,13 +232,34 @@ test('a saved stop resumes after a plugin restart and replays', function()
   local p = port()
   local f = seed(p, 'alice')
   H.hub('hub.admin.stop', {plugin = 'tunnels'})
-  local value = catalog()
-  value.stops = value.stops or {}
-  value.stops[stop_key('alice', 'restart')] = saved_stop(f, p)
-  write({{key = 'forwards', value = value}})
+  T.edit(function(value)
+    value.stops = value.stops or {}
+    value.stops[stop_key('alice', 'restart')] = saved_stop(f, p)
+  end)
   H.hub('hub.admin.start', {plugin = 'tunnels'})
   wait('the restarted plugin finishes the stop', function() return next(catalog().stops or {}) == nil end, 30)
   expect(blocks()[f]).to_be(nil)
   expect(alice:call('tunnels.stop', {forward = f, key = 'restart'})).to_equal({forward = f, stopped = true})
+  no_cleanup_for(p)
+end)
+
+test('T.edit keeps a plugin commit that comes between its read and its write', function()
+  -- write() with if_rev (LazyRex docs/testing.md): the stale write fails with conflict, and T.edit
+  -- applies its change again on the fresh record. Without if_rev, this write would put the stopped
+  -- forward back (README, known issue).
+  local p = port()
+  local f = seed(p, 'alice')
+  -- The count is a table field: Rex Lua detaches a local that a closure captured before a caught
+  -- error (T.edit catches the conflict), so a plain local would read 1 here.
+  local calls = {n = 0}
+  T.edit(function(value) calls.n = calls.n + 1; value.test_marker = 'edit-' .. p end, function()
+    -- A plugin commit between the read and the write: the stop removes the forward.
+    expect(alice:call('tunnels.stop', {forward = f, key = 'between-' .. p})).to_equal({forward = f, stopped = true})
+  end)
+  expect(calls.n, 'the edit ran again after the conflict').to_be(2)
+  local value = catalog()
+  expect(value.test_marker).to_be('edit-' .. p)
+  expect((value.forwards or {})[f], 'the plugin change stays').to_be(nil)
+  T.edit(function(v) v.test_marker = nil end)
   no_cleanup_for(p)
 end)

@@ -20,7 +20,7 @@ local function intent(id, p, session_id, source)
     fingerprint = fingerprint(p, session_id), created = os.date('!%Y-%m-%dT%H:%M:%SZ'), saved_at = os.time() - 1,
     phase = 'sending', creator = {kind = 'user'}}
 end
-local function save(f) local v = T.catalog(); v.intents = v.intents or {}; v.cleanups = v.cleanups or {}; f(v); write({{key = 'forwards', value = v}}) end
+local function save(f) T.edit(function(v) v.intents = v.intents or {}; v.cleanups = v.cleanups or {}; f(v) end) end
 local function labeled(session_id, label, command)
   return rex.call('session.new_block', {session_id = session_id, flavor = 'com.superlogical.terminal.shell', label = label,
     options = {command = command, login = false, exit = {on_completion = false}}}).block_id

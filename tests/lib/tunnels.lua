@@ -49,6 +49,25 @@ return function(E, tests_dir)
     return list
   end
   function T.catalog() return E.store('forwards').value or {} end
+  -- edit changes the forwards record as another writer: it reads the value and its revision, calls
+  -- f(value), and writes the value back with that revision (if_rev). A plugin commit in between
+  -- makes the write fail with conflict; then edit reads again and calls f again on the fresh
+  -- value, so f must only change the value it gets. Other errors raise. Rex Lua 0.0.1792158932-g88fd41
+  -- (lab): a local that f captured and changes reads stale in the caller after a caught conflict;
+  -- keep such state in a table field. between (tests of edit
+  -- only) runs after the first read and before the first write. It answers the written value.
+  function T.edit(f, between)
+    for attempt = 1, 10 do
+      local r = E.store('forwards')
+      local value = r.value or {}
+      f(value)
+      if attempt == 1 and between then between() end
+      local ok, err = pcall(E.write, {{key = 'forwards', value = value, if_rev = r.rev}})
+      if ok then return value end
+      if not (type(err) == 'table' and err.code == 'conflict') then error(err, 0) end
+    end
+    error('edit: the forwards record kept changing', 2)
+  end
   function T.cleanups() local c = {}; for profile in pairs(T.catalog().cleanups or {}) do c[#c + 1] = profile end; table.sort(c); return c end
   function T.blocks(session)
     local by_id = {}
