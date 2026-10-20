@@ -310,12 +310,80 @@ local function attempt_exit(attempt)
   local code = digits and tonumber(digits)
   if code and code <= 255 then return code end
 end
+-- process_list answers the argv tokens of every process from one full ps read, or nil and the
+-- reason. A read is good only when ps succeeds and its list holds the plugin's own pid (the
+-- principal pid of server.whoami: the rex do process, observed on Rex 0.0.1792158932-g88fd41).
+local function process_list()
+  local who = rex.call('server.whoami', {})
+  local pid = type(who) == 'table' and type(who.principal) == 'table' and tonumber(who.principal.pid)
+  if not pid then return nil, 'the plugin pid is unknown' end
+  local ok, r = run({'/bin/ps', '-axww', '-o', 'pid=', '-o', 'command='})
+  if not ok or type(r.stdout) ~= 'string' then return nil, 'the process list failed' end
+  local list, seen, out = {}, false, r.stdout
+  for line in out:gmatch('[^\n]+') do
+    local p, command = line:match('^%s*(%d+)%s+(.*)$')
+    if p then
+      if tonumber(p) == pid then seen = true end
+      local argv = {}
+      for token in command:gmatch('%S+') do argv[#argv + 1] = token end
+      list[#list + 1] = argv
+    end
+  end
+  if not seen then return nil, 'the process list does not show the plugin' end
+  return list
+end
+-- A wrapper of key: a process with a tunnels-down.sh token and key as a token.
+local function has_wrapper(list, key)
+  for _, argv in ipairs(list) do
+    local script, with_key = false, false
+    for _, t in ipairs(argv) do
+      if t == 'tunnels-down.sh' or t:sub(-16) == '/tunnels-down.sh' then script = true end
+      if t == key then with_key = true end
+    end
+    if script and with_key then return true end
+  end
+  return false
+end
+-- A down child of profile: the tokens "--profile", profile, "down" in a row, in any executable. The
+-- match is broad, so it fails closed.
+local function has_down(list, profile)
+  for _, argv in ipairs(list) do
+    for i = 1, #argv - 2 do
+      if argv[i] == '--profile' and argv[i + 1] == profile and argv[i + 2] == 'down' then return true end
+    end
+  end
+  return false
+end
+-- attempt_over answers true when no wrapper of key runs and then, in a second good read, no down
+-- child of profile runs: the attempt can never run down again. It answers false and the reason
+-- while one runs, and nil and the reason after a bad read. A dead wrapper cannot start a child, so
+-- the wrapper check comes first.
+local function attempt_over(key, profile)
+  local list, why = process_list()
+  if not list then return nil, why end
+  if has_wrapper(list, key) then return false, 'the stop of ' .. profile .. ' still runs' end
+  list, why = process_list()
+  if not list then return nil, why end
+  if has_down(list, profile) then return false, 'an opentunnel down of ' .. profile .. ' still runs' end
+  return true
+end
+-- release_gate answers true when a good read shows no down child of profile. A record ends (the
+-- port is free) only after a result of 0 and then this gate; this also covers a down child of an
+-- older attempt that still hangs.
+local function release_gate(profile)
+  local list, why = process_list()
+  if not list then return nil, why end
+  if has_down(list, profile) then return false, 'an opentunnel down of ' .. profile .. ' still runs' end
+  return true
+end
 -- advance_cleanups moves each cleanup one step: new -> sending (saved before session.new_block) ->
--- running (block known) -> closing (the result is saved; the block closes) -> done (exit 0: the
--- record is removed) or retry (after 5 s). A running block that disappears is retried: its process
--- ended with the block. A sending record with an unknown create result is adopted with process
--- proof, as for intents. A fenced one that has no proof is claimed: a plugin claim ends the
--- attempt (retry); a script claim waits for the attempt's exit file. It answers whether work remains.
+-- running (block known) -> closing (the result is saved; the block closes) -> done (exit 0 and the
+-- release gate: the record is removed) or retry (after 5 s). A running block that disappears, or a
+-- wrapper that ended without a receipt, is retried only when attempt_over shows that the attempt
+-- can never run down again. A sending record with an unknown create result is adopted with process
+-- proof, as for intents. A fenced one that has no proof is claimed: a plugin claim ends the attempt
+-- (retry); a script claim uses the attempt's exit file, or else attempt_over. It answers whether
+-- work remains.
 -- set_cleanup applies f to the record of profile and answers whether the record existed.
 local function set_cleanup(profile, f)
   local seen = {found = false}
@@ -332,7 +400,11 @@ local function advance_cleanups()
     if c.phase == 'running' then
       local block = by_id and by_id[c.block_id]
       if by_id and not block then
-        set_cleanup(profile, function(x) x.phase, x.block_id, x.retry_at = 'retry', nil, now end)
+        -- The block is gone without a result. Retry only when the attempt can never run down again.
+        local over, why = attempt_over(c.key, profile)
+        if over then
+          set_cleanup(profile, function(x) if x.block_id == c.block_id then x.phase, x.block_id, x.retry_at = 'retry', nil, now end end)
+        else cleanup_errors[profile] = why end
       elseif block then
         -- tunnels-down.sh prints a receipt with the key and the exit code of `down` and waits, so
         -- that an attempt stays provable until it is adopted. A process that ended without a
@@ -342,7 +414,11 @@ local function advance_cleanups()
         if code then
           c.result = code == 0 and {ok = true} or {error = 'exit status ' .. code}
         elseif process and not process.child and process.last_exit then
-          c.result = {error = 'stopped before its result: ' .. tostring(process.last_exit.error or process.last_exit.exit_code)}
+          -- The wrapper ended without a receipt. Its down child can outlive it, so the attempt
+          -- fails only when the process checks show that it can never run down again.
+          local over, why = attempt_over(c.key, profile)
+          if over then c.result = {error = 'stopped before its result: ' .. tostring(process.last_exit.error or process.last_exit.exit_code)}
+          else cleanup_errors[profile] = why end
         end
         if c.result then
           -- A table field, not a local: in Rex Lua a closure's write to a captured local can be lost
@@ -368,7 +444,11 @@ local function advance_cleanups()
       end
       if gone then
         local result = type(c.result) == 'table' and c.result or {error = 'unknown result'}
-        if result.ok then
+        local open, why
+        if result.ok then open, why = release_gate(profile) end
+        if result.ok and not open then
+          cleanup_errors[profile] = why -- The record stays closing; the next pass checks again.
+        elseif result.ok then
           cleanup_errors[profile] = nil
           update(function(s) if s.cleanups[profile] and s.cleanups[profile].block_id == c.block_id then s.cleanups[profile] = nil end end)
           invalidate()
@@ -389,11 +469,21 @@ local function advance_cleanups()
           cleanup_errors[profile] = code and ('exit status ' .. code) or nil
           set_cleanup(profile, function(x) if x.key == c.key then x.phase, x.retry_at = 'retry', code and now + 5 or now end end)
         elseif code == 0 then
-          cleanup_errors[profile] = nil
-          update(function(s) if s.cleanups[profile] and s.cleanups[profile].key == c.key then s.cleanups[profile] = nil end end)
-          invalidate()
-        elseif not owner then cleanup_errors[profile] = why end
-        -- A script claim without a valid exit file: the attempt may still run down. Keep the profile.
+          local open, shut = release_gate(profile)
+          if open then
+            cleanup_errors[profile] = nil
+            update(function(s) if s.cleanups[profile] and s.cleanups[profile].key == c.key then s.cleanups[profile] = nil end end)
+            invalidate()
+          else cleanup_errors[profile] = shut end
+        elseif owner == 'script' then
+          -- A script claim without a valid exit file: the attempt may still run down. Retry only
+          -- when the process checks show that it can never run down again; else keep the profile.
+          local over, busy = attempt_over(c.key, profile)
+          if over then
+            cleanup_errors[profile] = 'the stop of ' .. profile .. ' ended without its result'
+            set_cleanup(profile, function(x) if x.key == c.key then x.phase, x.retry_at = 'retry', now end end)
+          else cleanup_errors[profile] = busy end
+        else cleanup_errors[profile] = why end
       end
       -- Otherwise the create result stays unknown: the profile stays owned.
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then

@@ -11,13 +11,16 @@
 -- or {data = text}. The stub answers /bin/test -d, /bin/mkdir [-p], /bin/ln -s, /usr/bin/readlink
 -- and /bin/cat from it. opts.fs gives the start state; opts.exec(argv) answers a call first, when it
 -- returns a result (for failures that the file system cannot show).
+-- server.whoami answers pid 4242. A full process read (/bin/ps -axww) lists s.processes (lines
+-- "<pid> <command>"; opts.processes, default only the plugin, pid 4242).
 return function(plugin_dir, base, opts)
   opts = opts or {}
   local vars, executables, overrides = opts.vars or {}, opts.executables or {}, opts.rex or {}
   if vars.HOME == nil then vars.HOME = '/sandbox/home' end
   -- The stub keeps its state in fields of s: a closure that reassigns a captured local can write a
   -- detached copy after a caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
-  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = opts.catalog or {}, ops = opts.ops or {}, fs = opts.fs or {}}
+  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = opts.catalog or {}, ops = opts.ops or {}, fs = opts.fs or {},
+    processes = opts.processes or {'4242 /usr/local/bin/rex do tunnels.lua'}}
   local function parent(path) return path:match('^(.*)/[^/]+$') end
   local function fs_exec(argv)
     local fs, cmd = s.fs, argv[1]
@@ -57,6 +60,7 @@ return function(plugin_dir, base, opts)
       local answer = opts.exec and opts.exec(argv)
       if answer then return answer end
       if argv[1] == '/bin/test' and argv[2] == '-x' then return {ok = executables[argv[3]] == true} end
+      if argv[1] == '/bin/ps' and argv[2] == '-axww' then return {ok = true, stdout = table.concat(s.processes, '\n') .. '\n'} end
       if opts.ps and argv[1] == '/bin/ps' then return opts.ps(argv) end
       answer = fs_exec(argv)
       if answer then return answer end
@@ -78,6 +82,7 @@ return function(plugin_dir, base, opts)
         end
         return {result = {}}
       end
+      if method == 'server.whoami' then return {principal = {kind = 'peer', pid = 4242}} end
       if method == 'session.list' then return {sessions = {{session_id = 's'}}} end
       if method == 'session.list_blocks' then return {blocks = {}} end
       if method == 'session.new_block' then s.creates[#s.creates + 1] = args; return {block_id = 'new'} end

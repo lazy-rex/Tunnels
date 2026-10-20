@@ -19,20 +19,22 @@ local function fence_sandbox(c, o)
   -- The stub reaches the sandbox through box: a table field, not a captured local (LazyRex
   -- docs/rex-protocol.md, "Rex Lua runtime").
   local box = {calls = {}}
+  local stubs = {
+    ['session.list'] = function() return {sessions = {{session_id = 'plugin'}}} end,
+    ['session.list_blocks'] = function() return {blocks = {}} end,
+    ['session.new_block'] = function(args)
+      local cat = box.s.catalog
+      box.calls[#box.calls + 1] = {args = args, record = cat.cleanups and cat.cleanups[PROFILE]}
+      if o.create then return o.create(args) end
+      return nil, 'connection reset' -- an unknown result: the record stays sending
+    end,
+  }
+  for method, fn in pairs(o.rex or {}) do stubs[method] = fn end -- o.rex replaces a default stub
   local s = load_sandbox(T.plugin_dir, base, {
     vars = o.vars or {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture},
-    executables = {[T.fixture] = true}, fs = o.fs, exec = o.exec,
+    executables = {[T.fixture] = true}, fs = o.fs, exec = o.exec, processes = o.processes,
     catalog = {fence = o.fence, cleanups = {[PROFILE] = c}},
-    rex = {
-      ['session.list'] = function() return {sessions = {{session_id = 'plugin'}}} end,
-      ['session.list_blocks'] = function() return {blocks = {}} end,
-      ['session.new_block'] = function(args)
-        local cat = box.s.catalog
-        box.calls[#box.calls + 1] = {args = args, record = cat.cleanups and cat.cleanups[PROFILE]}
-        if o.create then return o.create(args) end
-        return nil, 'connection reset' -- an unknown result: the record stays sending
-      end,
-    }})
+    rex = stubs})
   box.s, s.calls = s, box.calls
   assert_true(s.loaded, 'the plugin loads: ' .. tostring(s.load_error))
   return s
@@ -127,7 +129,13 @@ test('a script claim with exit 0 releases the profile; another code retries (san
   end
 end)
 
-test('a script claim without a valid exit file keeps the profile (sandbox)', function()
+-- WRAPPER and DOWN are ps lines of a live wrapper of key KEY and of a live down child of PROFILE.
+local function wrapper_line(key) return '501 /bin/sh ' .. T.plugin_dir .. '/tunnels-down.sh ' .. key .. ' ' .. T.fixture .. ' ' .. PROFILE .. ' /x/' .. key end
+local DOWN = '502 /bin/sh ' .. T.fixture .. ' --profile ' .. PROFILE .. ' down'
+local PLUGIN = '4242 /usr/local/bin/rex do tunnels.lua'
+
+test('a script claim without a valid exit file is no result: it never releases the profile (sandbox)', function()
+  -- No wrapper and no down child run, so the process checks end the attempt: retry, never release.
   for _, data in ipairs({false, '', '256\n', '0 x', 'x\n', '1000\n', '-1\n', '0\n\n'}) do
     local fs = {}
     local c = fenced(fs, 'dd')
@@ -135,7 +143,7 @@ test('a script claim without a valid exit file keeps the profile (sandbox)', fun
     if data then fs[c.attempt .. '/exit'] = {data = data} end
     local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1'})
     s:tick()
-    expect(record(s).phase, tostring(data)).to_be('sending')
+    expect(record(s).phase, tostring(data)).to_be('retry')
     expect(#s.calls, tostring(data)).to_be(0)
   end
   -- An unreadable exit file (cat fails) is no result either.
@@ -145,7 +153,124 @@ test('a script claim without a valid exit file keeps the profile (sandbox)', fun
   fs[c.attempt .. '/exit'] = {data = '0\n'}
   local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', exec = function(argv) if argv[1] == '/bin/cat' then return {ok = false} end end})
   s:tick()
+  expect(record(s).phase).to_be('retry')
+end)
+
+test('a script claim without a result waits while its wrapper or a down child runs (sandbox)', function()
+  local fs = {}
+  local c = fenced(fs, 'wa')
+  fs[c.attempt .. '/claim'] = {link = 'script'}
+  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', processes = {PLUGIN, wrapper_line('wa')}})
+  s:tick()
+  expect(record(s).phase, 'the wrapper runs').to_be('sending')
+  s.processes = {PLUGIN, DOWN}
+  s:tick()
+  expect(record(s).phase, 'a down child runs').to_be('sending')
+  -- The wrapper of another key does not hold this attempt.
+  s.processes = {PLUGIN, wrapper_line('other')}
+  s:tick()
+  expect(record(s).phase, 'nothing of this attempt runs').to_be('retry')
+end)
+
+test('the down check uses a second, new process list (sandbox)', function()
+  -- The first list shows nothing; the down child shows only in the second list.
+  local fs = {}
+  local c = fenced(fs, 'wb')
+  fs[c.attempt .. '/claim'] = {link = 'script'}
+  local reads = {n = 0}
+  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', exec = function(argv)
+    if argv[1] == '/bin/ps' and argv[2] == '-axww' then
+      reads.n = reads.n + 1
+      return {ok = true, stdout = PLUGIN .. '\n' .. (reads.n % 2 == 0 and DOWN .. '\n' or '')}
+    end
+  end})
+  s:tick()
+  expect(reads.n, 'two reads').to_be(2)
   expect(record(s).phase).to_be('sending')
+end)
+
+test('a bad process read keeps the profile (sandbox)', function()
+  local bad = {
+    ['ps fails'] = {exec = function(argv) if argv[1] == '/bin/ps' then return {ok = false, stderr = 'ps: failed'} end end},
+    ['ps has no output'] = {exec = function(argv) if argv[1] == '/bin/ps' then return {ok = true} end end},
+    ['ps does not list the plugin'] = {processes = {'1 /sbin/launchd'}},
+    ['the plugin pid is unknown'] = {rex = {['server.whoami'] = function() return nil, 'refused' end}},
+  }
+  for name, o in pairs(bad) do
+    local fs = {}
+    local c = fenced(fs, 'wc')
+    fs[c.attempt .. '/claim'] = {link = 'script'}
+    o.fs, o.fence = fs, ROOT .. '/f1'
+    local s = fence_sandbox(c, o)
+    s:tick()
+    expect(record(s).phase, name).to_be('sending')
+    -- A script claim with exit 0 waits for a good read too (the release gate).
+    fs[c.attempt .. '/exit'] = {data = '0\n'}
+    s:tick()
+    assert_true(record(s) ~= nil, name .. ': no release')
+  end
+end)
+
+test('the release gate: exit 0 does not free the profile while a down child of it runs (sandbox)', function()
+  local fs = {}
+  local c = fenced(fs, 'wd')
+  fs[c.attempt .. '/claim'] = {link = 'script'}
+  fs[c.attempt .. '/exit'] = {data = '0\n'}
+  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1', processes = {PLUGIN, DOWN}})
+  s:tick()
+  expect(record(s).phase).to_be('sending')
+  -- A wrapper alone does not hold the gate: only a down child can stop the next forward.
+  s.processes = {PLUGIN, wrapper_line('wd')}
+  s:tick()
+  expect(record(s)).to_be(nil)
+end)
+
+test('the release gate holds a closing record whose result is 0 (sandbox)', function()
+  -- The block is gone and the result is 0 (also a legacy record), but a down child of the profile runs.
+  local s = fence_sandbox({phase = 'closing', key = 'k1', saved_at = 0, block_id = 'gone', result = {ok = true}}, {processes = {PLUGIN, DOWN}})
+  s:tick()
+  expect(record(s).phase).to_be('closing')
+  s.processes = {PLUGIN}
+  s:tick()
+  expect(record(s)).to_be(nil)
+end)
+
+test('a running block that disappears retries only when nothing of its attempt runs (sandbox)', function()
+  for _, fenced_record in ipairs({true, false}) do
+    local c = {phase = 'running', key = 'we', saved_at = 0, block_id = 'gone'}
+    if fenced_record then c.fence_v, c.attempt = 1, ROOT .. '/f1/we' end
+    local s = fence_sandbox(c, {processes = {PLUGIN, wrapper_line('we')}})
+    s:tick()
+    expect(record(s).phase, 'the wrapper runs').to_be('running')
+    s.processes = {PLUGIN, DOWN}
+    s:tick()
+    expect(record(s).phase, 'a down child runs').to_be('running')
+    expect(#s.calls, 'no new attempt while one runs').to_be(0)
+    -- Nothing runs: retry, and a new attempt (a later timer of the same tick can already send it).
+    s.processes = {PLUGIN}
+    s:tick()
+    s:tick()
+    expect(#s.calls, 'a new attempt').to_be(1)
+    assert_true(record(s).key ~= 'we', 'with a new key')
+  end
+end)
+
+test('a wrapper that ended without a receipt fails its attempt only when no down child runs (sandbox)', function()
+  local c = {phase = 'running', key = 'wf', saved_at = 0, block_id = 'd', fence_v = 1, attempt = ROOT .. '/f1/wf'}
+  local s = fence_sandbox(c, {processes = {PLUGIN, DOWN}, rex = {
+    ['session.list_blocks'] = function() return {blocks = {{block_id = 'd', placement = 'detached'}}} end,
+    ['com.superlogical.terminal.format'] = function() return {content = 'killed'} end,
+    ['com.superlogical.terminal.process'] = function() return {last_exit = {exit_code = 137}} end,
+    ['block.close'] = function() return {} end,
+  }})
+  s:tick()
+  expect(record(s).phase, 'a down child runs').to_be('running')
+  expect(record(s).result).to_be(nil)
+  -- Nothing runs: the attempt fails (closing, the block closes, then retry). It never releases.
+  s.processes = {PLUGIN}
+  s:tick()
+  assert_true(record(s) ~= nil, 'no release')
+  expect(record(s).phase).to_be('retry')
 end)
 
 test('an unknown owner or a missing attempt directory keeps the profile (sandbox)', function()
