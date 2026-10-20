@@ -460,6 +460,17 @@ local function waiting_for(p, text)
   end, 15)
 end
 local function exists(path) local r = rex.exec({'/bin/test', '-e', path}, {timeout = 10}); return r and r.ok end
+-- lab_test runs a test that holds a down or gates a wrapper with raise. It removes those files
+-- after the body, also when the body fails, so no held process outlives the test.
+local raised = {}
+local function raise(name) raised[#raised + 1] = name; T.flag(name, true) end
+local function lab_test(title, body)
+  test(title, function()
+    local ok, err = pcall(body)
+    for i = #raised, 1, -1 do T.flag(raised[i], false); raised[i] = nil end
+    if not ok then error(err, 0) end
+  end)
+end
 -- alive answers whether process pid runs (and its command has text, if given).
 local function alive(pid, text)
   local r = rex.exec({'/bin/ps', '-o', 'command=', '-p', tostring(pid)}, {timeout = 10})
@@ -482,16 +493,18 @@ local function child_of(parent, text)
   return found
 end
 
-test('the lab gate pauses a claimed wrapper before its down; the profile stays reserved while it waits', function()
+lab_test('the lab gate pauses a claimed wrapper before its down; the profile stays reserved while it waits', function()
   local p = T.port()
   local profile, key = T.prefix .. p, 'gate' .. p
   local attempt = lab_attempts .. '/' .. key
   sh({'/bin/mkdir', attempt})
-  T.flag('down-gate-' .. key, true)
-  lost_create(p, key, attempt)
+  raise('down-gate-' .. key)
+  -- The script starts and claims first; then the test saves the record. In the other order a
+  -- maintenance pass can claim the attempt for the plugin before the script starts.
   local P = plugin_session()
   local b = script_block(P, key, profile, attempt, 'fence-test:' .. key)
   wait('the wrapper waits at the gate', function() return exists(T.fake .. '/down-gated-' .. key) end, 10)
+  lost_create(p, key, attempt)
   -- The order: the claim is the script's, and down has not run.
   expect(sh({'/usr/bin/readlink', attempt .. '/claim'}).stdout).to_be('script\n')
   expect(T.down_calls(p), 'no down yet').to_be(0)
@@ -505,16 +518,18 @@ test('the lab gate pauses a claimed wrapper before its down; the profile stays r
   rex.call('block.close', {session_id = P, block_id = b})
 end)
 
-test('a killed wrapper whose down child lives keeps the profile until the child ends; then a retry releases it', function()
+lab_test('a killed wrapper whose down child lives keeps the profile until the child ends; then a retry releases it', function()
   local p = T.port()
   local profile, key = T.prefix .. p, 'kill' .. p
   local attempt = lab_attempts .. '/' .. key
   sh({'/bin/mkdir', attempt})
-  T.flag('hold-down-' .. profile, true)
-  lost_create(p, key, attempt)
+  raise('hold-down-' .. profile)
+  -- The script claims and starts its down first; then the test saves the record (see the gate test).
   local P = plugin_session()
   local b = script_block(P, key, profile, attempt, 'fence-test:' .. key)
   wait('the down child runs', function() return T.down_calls(p) == 1 end, 10)
+  expect(sh({'/usr/bin/readlink', attempt .. '/claim'}).stdout).to_be('script\n')
+  lost_create(p, key, attempt)
   -- The wrapper: the one process with the test's own key in its tunnels-down.sh argv. The test
   -- started it and checks its pid by argv before the kill.
   local pid = child_of(nil, '/tunnels-down.sh ' .. key .. ' ')
@@ -539,7 +554,7 @@ test('a killed wrapper whose down child lives keeps the profile until the child 
   rex.call('block.close', {session_id = P, block_id = b})
 end)
 
-test('a hanging down of the profile holds the release of a result 0', function()
+lab_test('a hanging down of the profile holds the release of a result 0', function()
   local p = T.port()
   local profile, key = T.prefix .. p, 'hang' .. p
   local attempt = lab_attempts .. '/' .. key
@@ -548,7 +563,7 @@ test('a hanging down of the profile holds the release of a result 0', function()
   sh({'/bin/ln', '-s', 'script', attempt .. '/claim'})
   sh({'/bin/sh', '-c', 'printf "0\\n" > "$1"', 'exit-file', attempt .. '/exit'})
   -- An older down of the profile that still hangs, in a block of its own.
-  T.flag('hold-down-' .. profile, true)
+  raise('hold-down-' .. profile)
   local P = plugin_session()
   local h = rex.call('session.new_block', {session_id = P, flavor = 'com.superlogical.terminal.shell', label = 'fence-test-hang:' .. p,
     options = {command = {'/bin/sh', T.fixture, '--profile', profile, 'down'}, login = false, exit = {on_completion = false}}}).block_id
