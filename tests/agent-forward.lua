@@ -1,5 +1,5 @@
 -- Forward on the agent path (tunnels.forward) and the shared handler with the view path. The user
--- decision (LazyRex docs/decisions.md, 7cf0851): agents may forward ports. An agent gives either
+-- decision "Agents use the Tunnels plugin fully": agents may forward ports. An agent gives either
 -- the source of a listener from tunnels.ports, or a port for the "Other port…" loopback form.
 -- Agent keys have their own namespace (fwd/...), so they never meet a view key or another agent's
 -- key. The replay lookup comes before any check of the current session, pane or listener.

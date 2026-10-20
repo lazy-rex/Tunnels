@@ -1,5 +1,5 @@
--- Tunnels: forward a local TCP port with opentunnel (the maintainer, 2026-10-17; docs/decisions.md, "Side panels
--- and the Tunnels plugin"). One forward is one detached Rex block in the session of the forwarded
+-- Tunnels: forward a local TCP port with opentunnel (the maintainer, 2026-10-17; decision "Side panels and
+-- the Tunnels plugin"). One forward is one detached Rex block in the session of the forwarded
 -- process. The block runs tunnels-run.sh, which runs `opentunnel serve` in the foreground, so the
 -- block owns the tunnel: Stop closes the block, and closing the session ends the tunnel.
 --
@@ -467,7 +467,7 @@ local function result_of(saved, fingerprint)
 end
 
 -- stop_forward stops the forward of block_id for caller. The user and any agent may stop any
--- forward (LazyRex docs/decisions.md, 7cf0851).
+-- forward (decision "Agents may act on anything").
 local function stop_forward(caller, block_id, key)
   if type(block_id) ~= 'string' or block_id == '' then fail('invalid_input', 'forward is required') end
   if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
@@ -842,7 +842,8 @@ local handlers = {
   ['hub.changed'] = function() return {} end,
 }
 -- Agent actions (agent parity). The hub forwards them with the agent's pid; hub.identify names
--- the agent and its pane. Agents may forward and stop any port (LazyRex docs/decisions.md, 7cf0851).
+-- the agent and its pane. Agents may forward and stop any port (decisions
+-- "Agents may act on anything" and "Agents use the Tunnels plugin fully").
 local agent_actions = {
   {name = 'tunnels.list', kind = 'client', title = 'List forwarded ports',
     description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups). Empty lists can appear as {}.',

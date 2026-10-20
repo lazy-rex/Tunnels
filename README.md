@@ -30,7 +30,8 @@ The hub gives agents these actions (MCP tools):
 - `tunnels.ports {session_id?}`: a new scan of the listening ports, as the form's Rescan. It
   changes only the scan that the form shows, so it takes no key.
 
-Agents may forward and stop any port (LazyRex `docs/decisions.md`, 7cf0851).
+Agents may forward and stop any port (decisions "Agents may act on anything" and "Agents use the
+Tunnels plugin fully", 2026-10-19).
 
 ## Cleanup
 

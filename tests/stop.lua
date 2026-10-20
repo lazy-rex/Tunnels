@@ -1,5 +1,5 @@
 -- Stop on both paths: the panel item (view) and tunnels.stop (tool). They call one handler: the
--- user and any agent may stop any forward (LazyRex docs/decisions.md, 7cf0851). A
+-- user and any agent may stop any forward (decision "Agents may act on anything"). A
 -- stop is saved before its block closes, so a key replays its first result after a failed final
 -- write, maintenance, or a plugin restart. Forwards use the fake opentunnel (lib/guard.lua).
 
@@ -81,7 +81,7 @@ test('the user stops a forward from the panel; tunnels.list and Rex agree', func
 end)
 
 test('an agent stops a user forward, a forward without a creator and one with a malformed creator', function()
-  -- The user decision (LazyRex docs/decisions.md, 7cf0851): an agent may stop any forward.
+  -- The user decision "Agents may act on anything": an agent may stop any forward.
   local p1, p2, p3 = port(), port(), port()
   local f = forward_by_user(p1)
   expect(f.created_by).to_be('user')
