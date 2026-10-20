@@ -237,7 +237,6 @@ local function refused_before_create(err)
   if code == 'bad_request' then return {code = code, message = type(msg) == 'string' and msg ~= '' and msg or 'Rex refused the request'} end
 end
 local cleanup_errors = {} -- profile -> the last failure, shown in the panel
-local cleanup_seq = 0
 local down_prefix = 'lazyrex-tunnel-down:'
 local maintain
 -- receipt answers the exit code of `down` when the screen of block_id has the exact receipt line of
@@ -248,16 +247,80 @@ local function receipt(block_id, key)
   local want = 'lazyrex-tunnel-down-exit ' .. key .. ' '
   for line in (screen.content .. '\n'):gmatch('([^\n]*)\n') do
     line = line:gsub('%s+$', '')
-    if line:sub(1, #want) == want and line:sub(#want + 1):match('^%d+$') then return tonumber(line:sub(#want + 1)) end
+    local digits = line:sub(1, #want) == want and line:sub(#want + 1):match('^%d%d?%d?$')
+    if digits and tonumber(digits) <= 255 then return tonumber(digits) end
   end
+end
+
+-- Fenced attempts (decision "Cleanup attempt fence", reviewed design v3). A fence is a directory
+-- <root>/<fence id>/ that the plugin makes once; the catalog keeps its absolute path (fence), so a
+-- HOME or XDG change cannot select another one. Each attempt gets a new random key and its own
+-- directory <fence>/<key>, made with mkdir before the record is saved, so an existing attempt
+-- state is never reused. Its record keeps the absolute path (attempt) and fence_v = 1. The script
+-- and the plugin both try to claim <attempt>/claim (a symlink to "script" or "plugin"): exactly
+-- one claim succeeds. A record without fence_v comes from an older plugin and is never claimed.
+-- Nothing deletes fence state.
+local function run(argv) local r = rex.exec(argv, {timeout = 5}); return r and r.ok == true, r end
+-- random_hex answers n random bytes as hex, or nil.
+local function random_hex(n)
+  local f = io.open('/dev/urandom', 'rb')
+  if not f then return nil end
+  local bytes = f:read(n)
+  f:close()
+  if type(bytes) ~= 'string' or #bytes ~= n then return nil end
+  return (bytes:gsub('.', function(c) return string.format('%02x', c:byte()) end))
+end
+local function fence_root()
+  local base = os.getenv('XDG_STATE_HOME')
+  if not base or base:sub(1, 1) ~= '/' then
+    local home = os.getenv('HOME')
+    if not home or home:sub(1, 1) ~= '/' then return nil end
+    base = home .. '/.local/state'
+  end
+  return base .. '/lazyrex-tunnels/attempts'
+end
+-- fence answers the absolute fence path of the catalog, after it makes a new fence if the catalog
+-- has none or its directory is gone. Old records keep their own attempt paths.
+local function fence()
+  local current = catalog().fence
+  if type(current) == 'string' and current ~= '' and (run({'/bin/test', '-d', current})) then return current end
+  local root, id = fence_root(), random_hex(8)
+  if not root then return nil, 'HOME is not an absolute path' end
+  if not id then return nil, 'no random bytes for the cleanup fence' end
+  if not run({'/bin/mkdir', '-p', root}) or not run({'/bin/mkdir', root .. '/' .. id}) then return nil, 'could not make the cleanup fence in ' .. root end
+  update(function(s) if s.fence == current then s.fence = root .. '/' .. id end end)
+  local saved = catalog().fence
+  if type(saved) == 'string' and saved ~= '' then return saved end
+  return nil, 'could not save the cleanup fence'
+end
+-- claim_attempt claims attempt for the plugin and answers the owner of its claim ('plugin' or
+-- 'script'), or nil and the reason. After a failed ln, readlink tells who owns it.
+local function claim_attempt(attempt)
+  if run({'/bin/ln', '-s', 'plugin', attempt .. '/claim'}) then return 'plugin' end
+  local ok, r = run({'/usr/bin/readlink', attempt .. '/claim'})
+  local owner = ok and type(r.stdout) == 'string' and r.stdout:match('^(%a+)\n?$')
+  if owner == 'plugin' or owner == 'script' then return owner end
+  return nil, 'the claim of cleanup attempt ' .. attempt .. ' is unreadable'
+end
+-- attempt_exit answers the exit code that attempt saved, or nil. Only a successful read of 1 to 3
+-- digits (an optional final newline) with a value from 0 to 255 is a result.
+local function attempt_exit(attempt)
+  local ok, r = run({'/bin/cat', attempt .. '/exit'})
+  local digits = ok and type(r.stdout) == 'string' and r.stdout:match('^(%d%d?%d?)\n?$')
+  local code = digits and tonumber(digits)
+  if code and code <= 255 then return code end
 end
 -- advance_cleanups moves each cleanup one step: new -> sending (saved before session.new_block) ->
 -- running (block known) -> closing (the result is saved; the block closes) -> done (exit 0: the
 -- record is removed) or retry (after 5 s). A running block that disappears is retried: its process
--- ended with the block. A sending record with an unknown
--- create result is adopted only with process proof, as for intents. It answers whether work remains.
+-- ended with the block. A sending record with an unknown create result is adopted with process
+-- proof, as for intents. A fenced one that has no proof is claimed: a plugin claim ends the
+-- attempt (retry); a script claim waits for the attempt's exit file. It answers whether work remains.
+-- set_cleanup applies f to the record of profile and answers whether the record existed.
 local function set_cleanup(profile, f)
-  update(function(s) if s.cleanups[profile] then f(s.cleanups[profile]) end end)
+  local seen = {found = false}
+  update(function(s) seen.found = s.cleanups[profile] ~= nil; if seen.found then f(s.cleanups[profile]) end end)
+  return seen.found
 end
 local function advance_cleanups()
   local state = catalog()
@@ -317,17 +380,39 @@ local function advance_cleanups()
     elseif c.phase == 'sending' then
       local block = by_id and proven(by_id, down_prefix .. c.key, c.key, c.saved_at, plugin_session, 'tunnels-down.sh')
       if block then set_cleanup(profile, function(x) x.phase, x.block_id = 'running', block.block_id end)
-      elseif not by_id then set_cleanup(profile, function(x) x.phase, x.retry_at = 'retry', now end) end
+      elseif not by_id then set_cleanup(profile, function(x) x.phase, x.retry_at = 'retry', now end)
+      elseif c.fence_v == 1 and type(c.attempt) == 'string' then
+        -- No proof. The claim decides: a plugin claim means that this attempt can never run down.
+        local owner, why = claim_attempt(c.attempt)
+        local code = owner == 'script' and attempt_exit(c.attempt)
+        if owner == 'plugin' or (code and code ~= 0) then
+          cleanup_errors[profile] = code and ('exit status ' .. code) or nil
+          set_cleanup(profile, function(x) if x.key == c.key then x.phase, x.retry_at = 'retry', code and now + 5 or now end end)
+        elseif code == 0 then
+          cleanup_errors[profile] = nil
+          update(function(s) if s.cleanups[profile] and s.cleanups[profile].key == c.key then s.cleanups[profile] = nil end end)
+          invalidate()
+        elseif not owner then cleanup_errors[profile] = why end
+        -- A script claim without a valid exit file: the attempt may still run down. Keep the profile.
+      end
       -- Otherwise the create result stays unknown: the profile stays owned.
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
       local opentunnel, why = find_opentunnel()
-      if not opentunnel then cleanup_errors[profile] = why
-      else
-        cleanup_seq = cleanup_seq + 1
-        local key = instance_id .. '-' .. now .. '-' .. cleanup_seq
-        set_cleanup(profile, function(x) x.phase, x.key, x.saved_at, x.block_id, x.result = 'sending', key, now, nil, nil end)
+      local dir, key, attempt
+      if opentunnel then dir, why = fence() end
+      if dir then
+        key = random_hex(16)
+        attempt = key and dir .. '/' .. key
+        -- mkdir fails on an existing directory: an attempt state is never reused.
+        if not attempt then why = 'no random bytes for the cleanup key'
+        elseif not run({'/bin/mkdir', attempt}) then why, attempt = 'could not make the cleanup attempt ' .. attempt, nil end
+      end
+      if not attempt then cleanup_errors[profile] = why
+      elseif set_cleanup(profile, function(x)
+          x.phase, x.key, x.saved_at, x.block_id, x.result, x.fence_v, x.attempt = 'sending', key, now, nil, nil, 1, attempt
+        end) then
         local created, err = rex.call('session.new_block', {session_id = plugin_session, flavor = 'com.superlogical.terminal.shell',
-          label = down_prefix .. key, options = {command = {'/bin/sh', plugin_dir .. '/tunnels-down.sh', key, opentunnel, profile},
+          label = down_prefix .. key, options = {command = {'/bin/sh', plugin_dir .. '/tunnels-down.sh', key, opentunnel, profile, attempt},
           login = false, exit = {on_completion = false}}})
         if created and created.block_id then
           set_cleanup(profile, function(x) if x.key == key then x.phase, x.block_id = 'running', created.block_id end end)
