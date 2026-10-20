@@ -34,7 +34,19 @@ test('a refused store write ends the view operation with the hub code; the next 
   quiet()
   local op = with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
     local _, key = v:admit('action', {node_id = 'fw/' .. b, action = 'stop', input = {item_id = 'stop'}})
-    return v:settle(key, 10)
+    -- The first operation read raises once, so wait catches an error during settle. The test gets
+    -- op as a return value: a local that the callback set reads stale after the catch (LazyRex
+    -- docs/rex-protocol.md, "Rex Lua runtime").
+    local original, once = H.operation, {raised = false}
+    H.operation = function(...)
+      if not once.raised then once.raised = true; error('test: transient operation read') end
+      return original(...)
+    end
+    local ok, result = pcall(v.settle, v, key, 10)
+    H.operation = original
+    if not ok then error(result, 0) end
+    assert_true(once.raised, 'the operation read raised once')
+    return result
   end)
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('injected_failure')
