@@ -256,7 +256,9 @@ test('T.edit keeps a plugin commit that comes between its read and its write', f
     -- A plugin commit between the read and the write: the stop removes the forward.
     expect(alice:call('tunnels.stop', {forward = f, key = 'between-' .. p})).to_equal({forward = f, stopped = true})
   end)
-  expect(calls.n, 'the edit ran again after the conflict').to_be(2)
+  -- At least one conflict (the stop). The stop's cleanup can commit again during the retry, so
+  -- more tries are correct too.
+  assert_true(calls.n >= 2, 'the edit ran again after the conflict: ' .. calls.n .. ' call(s)')
   local value = catalog()
   expect(value.test_marker).to_be('edit-' .. p)
   expect((value.forwards or {})[f], 'the plugin change stays').to_be(nil)
