@@ -487,9 +487,9 @@ local function advance_cleanups()
         else cleanup_errors[profile] = why end
       end
       -- Otherwise the create result stays unknown: the profile stays owned. That holds for a legacy
-      -- record (no fence_v) also when the plugin session is not listed: a create that Rex accepted
-      -- earlier can still start the old script, which has no fence. Only an explicit release by the user
-      -- can end it (decision "Cleanup attempt fence", J).
+      -- record (no fence_v) also when the plugin session is not listed: a missing session does not
+      -- prove that an earlier accepted create cannot start the old script, which has no fence. Only
+      -- an explicit release by the user can end it (decision "Cleanup attempt fence", J).
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
       -- No new attempt while the plugin session is not listed: its create would fail, and each try
       -- would leave one more attempt directory.

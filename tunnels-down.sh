@@ -24,6 +24,17 @@ if [ $# -ge 4 ]; then
     printf '\nlazyrex-tunnel-down-fenced %s\n' "$KEY"
     exit 0
   fi
+  # LAB ONLY (decision "Cleanup attempt fence", C.b): the lab pauses a claimed wrapper before its
+  # down. It applies only to the fake opentunnel of the tests and a lab profile, so a real cleanup
+  # never waits here.
+  case "$PROFILE:$OT" in
+    lazyrexlab-*:*/tests/fake-opentunnel.sh)
+      if [ -n "${FAKE_OT_DIR:-}" ]; then
+        # touch, not a redirection: a failed redirection on : would end this shell.
+        /usr/bin/touch "$FAKE_OT_DIR/down-gated-$KEY" 2>/dev/null
+        while [ -e "$FAKE_OT_DIR/down-gate-$KEY" ]; do sleep 0.2; done
+      fi ;;
+  esac
 fi
 "$OT" --profile "$PROFILE" down
 CODE=$?

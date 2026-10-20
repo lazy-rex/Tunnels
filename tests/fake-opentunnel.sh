@@ -26,6 +26,12 @@ case $CMD in
     [ -f "$DIR/fail-down" ] && { echo "fake-opentunnel: down failed" >&2; exit 1; }
     # slow-down: down waits 8 s first (time to try a Forward or a restart while it runs).
     [ -f "$DIR/slow-down" ] && sleep 8
+    # hold-down-<profile>: down of that profile waits while the file exists (a hanging down). It
+    # ignores SIGHUP, so it outlives a killed wrapper and the hangup of its pane.
+    if [ -f "$DIR/hold-down-$PROFILE" ]; then
+      trap '' HUP
+      while [ -f "$DIR/hold-down-$PROFILE" ]; do sleep 0.2; done
+    fi
     if [ -f "$DIR/$PROFILE.service" ]; then rm -f "$DIR/$PROFILE.service"; echo "Disconnected profile $PROFILE."; else echo "Profile $PROFILE is not connected."; fi ;;
   serve)
     { [ "${FAKE_OT_SERVE_FAIL:-}" = 1 ] || [ -f "$DIR/fail-serve" ]; } && { echo "fake-opentunnel: serve failed" >&2; exit 3; }

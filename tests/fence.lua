@@ -337,7 +337,7 @@ test('a missing plugin session: a plugin claim retries; a script exit 0 goes thr
 end)
 
 test('a missing plugin session keeps a legacy sending record (sandbox)', function()
-  -- A create that Rex accepted earlier can still start the old script, which has no fence.
+  -- A missing session does not prove that an earlier accepted create cannot start the old script.
   local s = fence_sandbox({phase = 'sending', key = 'gd', saved_at = os.time() - 1}, {rex = NO_SESSION})
   s:tick()
   s:tick()
@@ -394,8 +394,9 @@ local function screen(P, b)
   local r = rex.call('com.superlogical.terminal.format', {session_id = P, block_id = b, args = {format = 'text', trim = true, unwrap = true}})
   return r and r.content or ''
 end
-local function script_block(P, key, profile, attempt)
-  return rex.call('session.new_block', {session_id = P, flavor = 'com.superlogical.terminal.shell', label = 'lazyrex-tunnel-down:' .. key,
+-- script_block runs tunnels-down.sh in a block of session P. label defaults to the cleanup label of key.
+local function script_block(P, key, profile, attempt, label)
+  return rex.call('session.new_block', {session_id = P, flavor = 'com.superlogical.terminal.shell', label = label or ('lazyrex-tunnel-down:' .. key),
     options = {command = {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile, attempt}, login = false, exit = {on_completion = false}}}).block_id
 end
 local lab_attempts = H.args.lab .. '/home/fence-test'
@@ -440,6 +441,125 @@ test('a script with a missing attempt directory runs no down', function()
   wait('the fenced line', function() return screen(P, b):find('lazyrex-tunnel-down-fenced ' .. key, 1, true) end, 10)
   expect(T.down_calls(p), 'no down').to_be(0)
   rex.call('block.close', {session_id = P, block_id = b})
+end)
+
+-- lost_create saves a fenced sending cleanup of port p with key and attempt, as after a lost create
+-- reply. A block that a test starts has another label, so the plugin cannot prove it as this attempt.
+local function lost_create(p, key, attempt)
+  local saved_at = os.time() - 1
+  T.edit(function(v)
+    v.cleanups = v.cleanups or {}
+    v.cleanups[T.prefix .. p] = {phase = 'sending', key = key, saved_at = saved_at, fence_v = 1, attempt = attempt}
+  end)
+end
+-- waiting_for answers the cleanup row of port p from tunnels.list when its error has text.
+local function waiting_for(p, text)
+  return wait('the cleanup of ' .. p .. ' waits: ' .. text, function()
+    local list = T.list().cleanups or {}
+    for _, c in pairs(list) do if c.profile == T.prefix .. p and c.error and c.error:find(text, 1, true) then return c end end
+  end, 15)
+end
+local function exists(path) local r = rex.exec({'/bin/test', '-e', path}, {timeout = 10}); return r and r.ok end
+-- alive answers whether process pid runs (and its command has text, if given).
+local function alive(pid, text)
+  local r = rex.exec({'/bin/ps', '-o', 'command=', '-p', tostring(pid)}, {timeout = 10})
+  if not (r and r.ok) then return false end
+  local command = r.stdout or ''
+  return command ~= '' and (not text or command:find(text, 1, true) ~= nil)
+end
+-- child_of answers the pid of the one process whose command has text (and whose parent is
+-- parent, if given), or nil.
+local function child_of(parent, text)
+  local found
+  local out = sh({'/bin/ps', '-axww', '-o', 'pid=', '-o', 'ppid=', '-o', 'command='}).stdout or ''
+  for line in out:gmatch('[^\n]+') do
+    local pid, ppid, command = line:match('^%s*(%d+)%s+(%d+)%s+(.*)$')
+    if pid and (parent == nil or tonumber(ppid) == parent) and command:find(text, 1, true) then
+      if found then return nil end
+      found = tonumber(pid)
+    end
+  end
+  return found
+end
+
+test('the lab gate pauses a claimed wrapper before its down; the profile stays reserved while it waits', function()
+  local p = T.port()
+  local profile, key = T.prefix .. p, 'gate' .. p
+  local attempt = lab_attempts .. '/' .. key
+  sh({'/bin/mkdir', attempt})
+  T.flag('down-gate-' .. key, true)
+  lost_create(p, key, attempt)
+  local P = plugin_session()
+  local b = script_block(P, key, profile, attempt, 'fence-test:' .. key)
+  wait('the wrapper waits at the gate', function() return exists(T.fake .. '/down-gated-' .. key) end, 10)
+  -- The order: the claim is the script's, and down has not run.
+  expect(sh({'/usr/bin/readlink', attempt .. '/claim'}).stdout).to_be('script\n')
+  expect(T.down_calls(p), 'no down yet').to_be(0)
+  T.open_panel(pane) -- a render kicks maintenance
+  waiting_for(p, 'the stop of ' .. profile .. ' still runs')
+  expect(T.catalog().cleanups[profile].key, 'the same attempt').to_be(key)
+  T.flag('down-gate-' .. key, false)
+  wait('the receipt', function() return screen(P, b):find('lazyrex-tunnel-down-exit ' .. key .. ' 0', 1, true) end, 10)
+  T.no_cleanup_for(p)
+  expect(T.down_calls(p), 'down ran once').to_be(1)
+  rex.call('block.close', {session_id = P, block_id = b})
+end)
+
+test('a killed wrapper whose down child lives keeps the profile until the child ends; then a retry releases it', function()
+  local p = T.port()
+  local profile, key = T.prefix .. p, 'kill' .. p
+  local attempt = lab_attempts .. '/' .. key
+  sh({'/bin/mkdir', attempt})
+  T.flag('hold-down-' .. profile, true)
+  lost_create(p, key, attempt)
+  local P = plugin_session()
+  local b = script_block(P, key, profile, attempt, 'fence-test:' .. key)
+  wait('the down child runs', function() return T.down_calls(p) == 1 end, 10)
+  -- The wrapper: the one process with the test's own key in its tunnels-down.sh argv. The test
+  -- started it and checks its pid by argv before the kill.
+  local pid = child_of(nil, '/tunnels-down.sh ' .. key .. ' ')
+  assert_true(pid, 'the wrapper pid')
+  -- The down child: the one process whose parent is the wrapper and whose argv is the down of profile.
+  local child = child_of(pid, '--profile ' .. profile .. ' down')
+  assert_true(child, 'the down child of the wrapper')
+  sh({'/bin/kill', '-KILL', tostring(pid)})
+  -- The exact child outlives the wrapper (the fake ignores the hangup while it holds).
+  wait('the wrapper is gone', function() return not alive(pid) end, 10)
+  assert_true(alive(child, '--profile ' .. profile .. ' down'), 'the down child ' .. child .. ' still runs')
+  T.open_panel(pane)
+  waiting_for(p, 'an opentunnel down of ' .. profile .. ' still runs')
+  expect(T.catalog().cleanups[profile].key, 'the same attempt').to_be(key)
+  assert_true(not exists(attempt .. '/exit'), 'no exit file')
+  assert_true(alive(child, '--profile ' .. profile .. ' down'), 'the down child still runs while the profile is kept')
+  -- End only the test-owned child: it leaves its hold and exits.
+  T.flag('hold-down-' .. profile, false)
+  wait('the down child ' .. child .. ' ends', function() return not alive(child) end, 10)
+  T.no_cleanup_for(p, 30)
+  expect(T.down_calls(p), 'the retry ran down again').to_be(2)
+  rex.call('block.close', {session_id = P, block_id = b})
+end)
+
+test('a hanging down of the profile holds the release of a result 0', function()
+  local p = T.port()
+  local profile, key = T.prefix .. p, 'hang' .. p
+  local attempt = lab_attempts .. '/' .. key
+  -- The attempt ended: a script claim and exit 0.
+  sh({'/bin/mkdir', attempt})
+  sh({'/bin/ln', '-s', 'script', attempt .. '/claim'})
+  sh({'/bin/sh', '-c', 'printf "0\\n" > "$1"', 'exit-file', attempt .. '/exit'})
+  -- An older down of the profile that still hangs, in a block of its own.
+  T.flag('hold-down-' .. profile, true)
+  local P = plugin_session()
+  local h = rex.call('session.new_block', {session_id = P, flavor = 'com.superlogical.terminal.shell', label = 'fence-test-hang:' .. p,
+    options = {command = {'/bin/sh', T.fixture, '--profile', profile, 'down'}, login = false, exit = {on_completion = false}}}).block_id
+  wait('the old down hangs', function() return T.down_calls(p) == 1 end, 10)
+  lost_create(p, key, attempt)
+  T.open_panel(pane)
+  waiting_for(p, 'an opentunnel down of ' .. profile .. ' still runs')
+  T.flag('hold-down-' .. profile, false)
+  T.no_cleanup_for(p)
+  expect(T.down_calls(p), 'no new down').to_be(1)
+  rex.call('block.close', {session_id = P, block_id = h})
 end)
 
 test('a fenced attempt whose create result was lost is released by a new attempt; Forward works again', function()
