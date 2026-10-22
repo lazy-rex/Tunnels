@@ -208,10 +208,10 @@ test('an agent intent with an unknown create result keeps its saved target and i
   T.no_cleanup_for(p)
 end)
 
-test('a legacy user operation key that looks like an agent key is not an agent operation', function()
+test('a user operation key that looks like an agent key is not an agent operation', function()
   local p = T.port()
-  -- Legacy user keys have no '/'. This one spells the agent framing with other separators.
-  T.put_operation{key = 'fwd.' .. #ids.alice .. ':' .. enc(ids.alice) .. '.6:legacy.', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
+  -- User keys have no '/'. This one spells the agent framing with other separators.
+  T.put_operation{key = 'fwd.' .. #ids.alice .. ':' .. enc(ids.alice) .. '.6:legacy.', fingerprint = 'forward-v2/5:other/' .. part(S) .. '0:/4:9999/', result = {panel = {command = 'tunnels'}}}
   local r = alice:call('tunnels.forward', {key = 'legacy', port = p, session_id = S})
   expect(r.port).to_be(p)
   expect(T.catalog().forwards[r.forward].op).to_be(agent_id(ids.alice, 'legacy'))
@@ -219,14 +219,9 @@ test('a legacy user operation key that looks like an agent key is not an agent o
   T.no_cleanup_for(p)
 end)
 
-test('view keys: a legacy v1 record replays; a new key with another source pane conflicts; a "/" key is refused', function()
+test('view keys: a new key with another source pane conflicts; a "/" key is refused', function()
   local p = T.port()
   local two = T.shell(S, 'two')
-  -- A result saved by the plugin before forward-v2 (the v1 fingerprint has no source pane).
-  T.put_operation{key = 'legacy-view-' .. p, fingerprint = 'forward/5:other/' .. #tostring(p) .. ':' .. p .. '/' .. S, result = {panel = {command = 'tunnels'}}}
-  local op = T.submit(T.open_form(pane), p, 'legacy-view-' .. p)
-  expect(op.status).to_be('succeeded')
-  expect(#T.tunnel_blocks(S), 'the replay started nothing').to_be(0)
   -- A new view operation: the source pane is part of the fingerprint.
   local first = T.submit(T.open_form(pane), p, 'view-v2-' .. p)
   expect(first.status).to_be('succeeded')
@@ -257,15 +252,13 @@ local function form_forward(s, key, port, source_block)
     input = {values = {port = 'other', other = tostring(port)}}, context = {session_id = 's', source_block_id = source_block}, operation_key = key})
 end
 
-test('the view path replays a v1 result and conflicts on a changed source pane (sandbox)', function()
+test('the view path conflicts on a v1 result and on a changed source pane (sandbox)', function()
+  -- A v1 fingerprint (forward/...) is other content: the import drops such results (coord-tunnels-v1-op).
   local v1 = {fingerprint = 'forward/5:other/4:4321/s', result = {panel = {command = 'tunnels'}}}
   local s = form_sandbox({['old-key'] = v1})
-  -- v1 has no source pane, so any pane replays the saved result. No create.
-  expect(form_forward(s, 'old-key', 4321, 'pane-a').result).to_equal({panel = {command = 'tunnels'}})
-  expect(form_forward(s, 'old-key', 4321, 'pane-b').result).to_equal({panel = {command = 'tunnels'}})
-  expect(form_forward(s, 'old-key', 4322, 'pane-a').error.code).to_be('operation_conflict')
+  expect(form_forward(s, 'old-key', 4321, 'pane-a').error.code).to_be('operation_conflict')
   expect(#s.creates).to_be(0)
-  -- A new key is saved with forward-v2, which has the source pane.
+  -- A key is saved with forward-v2, which has the source pane.
   expect(form_forward(s, 'new-key', 4323, 'pane-a').result).to_equal({panel = {command = 'tunnels'}})
   expect(#s.creates).to_be(1)
   expect(s.ops['new-key'].fingerprint).to_be('forward-v2/5:other/1:s/6:pane-a/4:4323/')

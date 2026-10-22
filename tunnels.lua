@@ -737,26 +737,21 @@ local function from_source(choice)
   port = valid_port(port)
   return {session_id = session_id, source_block = block_id ~= '' and block_id or nil, port = port, target = target(address, port)}
 end
-local function fingerprint_matches(stored, req)
-  return stored == req.fingerprint or (req.legacy ~= nil and stored == req.legacy)
-end
-
 -- start_forward runs one Forward request for the view and the agent path. req = {id, fingerprint,
--- legacy (view only: the v1 fingerprint of records saved before forward-v2), creator, resolve =
--- function answering {session_id, source_block, port, target}}.
+-- creator, resolve = function answering {session_id, source_block, port, target}}.
 -- The replay lookup comes first: a saved result or intent never depends on the current scan.
 local function start_forward(req)
   local id = req.id
   local saved = store.op(id)
   if saved.found then
-    if not fingerprint_matches(saved.fingerprint, req) then fail('operation_conflict', 'This key has different content') end
+    if saved.fingerprint ~= req.fingerprint then fail('operation_conflict', 'This key has different content') end
     if type(saved.result) == 'table' and saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
     return saved.result
   end
   local state = catalog()
   local intent = state.intents[id]
   if intent then
-    if not fingerprint_matches(intent.fingerprint, req) then fail('operation_conflict', 'This key has different content') end
+    if intent.fingerprint ~= req.fingerprint then fail('operation_conflict', 'This key has different content') end
     -- Sent before with an unknown result: never send it again. Look for its block.
     local by_id = blocks_of(intent.session_id, sessions())
     if not by_id then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}}); fail('not_found', 'The session closed before the tunnel started') end
@@ -831,7 +826,6 @@ local function forward(args)
   return start_forward({
     id = id,
     fingerprint = 'forward-v2/' .. (scan_mode and part('scan') .. part(choice) or part('other') .. part(ctx_session) .. part(ctx_source) .. part(other)),
-    legacy = 'forward/' .. #choice .. ':' .. choice .. '/' .. #other .. ':' .. other .. '/' .. tostring(ctx.session_id),
     creator = {kind = 'user'},
     resolve = function()
       if scan_mode then return from_source(choice) end
