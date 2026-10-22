@@ -13,7 +13,7 @@ local function fixture(value, pages, opts)
   local f = {execs = {}, printed = {}, hub_calls = {}}
   local db = {}
   function db.migrate() end
-  function db.first(sql) if sql:find("name = 'import'", 1, true) then return opts.imported and {value = 'done'} or nil end end
+  function db.first(sql) if sql:find("name = 'import'", 1, true) then return opts.mark and {value = opts.mark} or nil end end
   function db.exec(sql, ...) f.execs[#f.execs + 1] = {sql = sql, args = {...}}; return {changes = 1} end
   function db.query() return {} end
   function db.transaction(fn) return fn() end
@@ -21,7 +21,7 @@ local function fixture(value, pages, opts)
   local app = {db = db, fail = function(code, message) error({code = code, message = message}, 0) end, start = function(fn) starts[#starts + 1] = fn end}
   function app.hub(action, args)
     f.hub_calls[#f.hub_calls + 1] = action
-    if action == 'hub.store.get' then return {records = {forwards = value and {value = value, rev = '1'} or nil}} end
+    if action == 'hub.store.get' then return {records = {forwards = value ~= nil and {value = value, rev = '1'} or nil}} end
     if action == 'hub.store.ops_scan' then
       local i = args.after == nil and 1 or tonumber(args.after:match('^page(%d+)$')) + 1
       local page = pages[i] or {}
@@ -90,8 +90,20 @@ test('the import refuses a sending cleanup with no fence, and an unknown field; 
   expect(f.error and f.error.code).to_be('internal')
 end)
 
+test('a mark other than done, a record that is not a table, or a kind that is not a table fails the import; nothing is written (fixture)', function()
+  local f = fixture({forwards = {}}, {}, {mark = 'running'})
+  expect(f.error and f.error.code, 'a mark other than done').to_be('internal')
+  expect(#f.execs).to_be(0)
+  expect(#f.hub_calls, 'no hub.store read').to_be(0)
+  for name, value in pairs({record = 'x', ['false kind'] = {forwards = false}, ['scalar kind'] = {stops = 5}, ['text kind'] = {intents = 'none'}}) do
+    f = fixture(value, {})
+    expect(f.error and f.error.code, name).to_be('internal')
+    expect(#f.execs, name .. ': nothing is written').to_be(0)
+  end
+end)
+
 test('a start after the import imports nothing; an empty store imports only the mark (fixture)', function()
-  local f = fixture({forwards = {b1 = {port = 1}}}, {{{key = 'x', fingerprint = 'stop-v1/x', result = {}}}}, {imported = true})
+  local f = fixture({forwards = {b1 = {port = 1}}}, {{{key = 'x', fingerprint = 'stop-v1/x', result = {}}}}, {mark = 'done'})
   expect(#f.execs).to_be(0)
   expect(#f.hub_calls, 'no hub.store read').to_be(0)
   f = fixture(nil, {})
@@ -129,4 +141,42 @@ test('a start imports the hub.store data into SQL; a v1 Forward operation is dro
   rex.sleep(3)
   expect(sql("SELECT value FROM meta WHERE name = 'writes'")[1].value, 'no write after the import').to_be(0)
   T.edit(function(v) v.forwards[pane.block] = nil; v.intents['imp-intent'] = nil end)
+end)
+
+test('a failed import commits nothing; the next start imports once, with the saved results as they were (lab)', function()
+  local p = T.port()
+  local fw = {session_id = S, port = p, target = '127.0.0.1:' .. p, profile = T.prefix .. p, op = 'rs-fw', created = '2026-10-22T00:00:02Z', creator = {kind = 'user'}}
+  local saved = {
+    ['rs-fw'] = {fingerprint = 'forward-v2/rs', result = {panel = {command = 'tunnels'}}},
+    ['rs-stop'] = {fingerprint = 'stop-v1/rs', result = {forward = 'block:y', stopped = true}},
+  }
+  H.hub('hub.admin.stop', {plugin = 'tunnels'})
+  write({{key = 'forwards', value = {forwards = {[pane.block] = fw}, intents = {}, cleanups = {}, stops = {}}}})
+  for key, op in pairs(saved) do put_operation{key = key, fingerprint = op.fingerprint, result = op.result} end
+  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do sql_write('DELETE FROM ' .. t) end
+  sql_write("DELETE FROM meta WHERE name IN ('import', 'fence')")
+  sql_write("UPDATE meta SET value = 0 WHERE name = 'writes'")
+  -- The import commit (it writes the rows, the ops and the mark) fails. The schema stays from the migration.
+  local held = inject{match = {sql_commit_writes = 'meta'}, fail = 'the import fails', times = 'always'}
+  local _, base = calls('none')
+  H.hub('hub.admin.start', {plugin = 'tunnels'})
+  wait('the import commit failed', function()
+    for _, c in ipairs(calls('hub.sql.commit', {after = base.next})) do return true end
+  end, 20)
+  local function count(t) return sql('SELECT count(*) AS n FROM ' .. t)[1].n end
+  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do expect(count(t), t .. ' after the failure').to_be(0) end
+  expect(sql("SELECT value FROM meta WHERE name = 'import'")[1], 'no mark').to_be(nil)
+  expect(sql("SELECT value FROM meta WHERE name = 'writes'")[1].value).to_be(0)
+  cancel_injection(held)
+  -- The hub starts a failed plugin again; an explicit start also works if it waits.
+  pcall(H.hub, 'hub.admin.start', {plugin = 'tunnels'})
+  wait('the import is done', function() local m = sql("SELECT value FROM meta WHERE name = 'import'")[1]; return m and m.value == 'done' end, 60)
+  expect(T.catalog().forwards[pane.block]).to_equal(fw)
+  local got = {}
+  for _, r in ipairs(sql('SELECT key, fingerprint, result FROM ops')) do got[r.key] = {fingerprint = r.fingerprint, result = rex.json.decode(r.result)} end
+  -- The earlier test's operations are still in hub.store, so they come again; these two come as saved.
+  for key, op in pairs(saved) do expect(got[key], key .. ', as it was').to_equal(op) end
+  rex.sleep(3)
+  expect(sql("SELECT value FROM meta WHERE name = 'writes'")[1].value, 'no write after the import').to_be(0)
+  T.edit(function(v) v.forwards[pane.block] = nil end)
 end)

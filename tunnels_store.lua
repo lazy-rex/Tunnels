@@ -179,9 +179,11 @@ function M.open(app)
 
   -- The import (decision "One storage system"): at the first start on SQL, one transaction copies the
   -- hub.store record "forwards" and every saved operation (hub.store.ops_scan) into the tables, and
-  -- sets meta import = 'done'. A later start imports nothing. A field that the schema does not have
-  -- fails the import, and nothing is written: the plugin does not start, and hub.store keeps the
-  -- state. Two kinds are not imported:
+  -- sets meta import = 'done'. A later start imports nothing; a mark with another value fails the start.
+  -- The migration (the empty tables) commits before, in its own transaction. So a failed import leaves
+  -- the empty schema and no mark: the plugin does not start, hub.store keeps the state, and the next
+  -- start imports again. A field that the schema does not have, or a kind that is not a table, fails
+  -- the import. Two kinds are not imported:
   -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
   --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
   --   prints one line for each.
@@ -189,12 +191,20 @@ function M.open(app)
   --   fails the import, because nothing proves that its old script can never run down.
   -- writes stays 0, so the release can tell that no write came after the import.
   local function import()
-    if db.first("SELECT value FROM meta WHERE name = 'import'") then return end
+    local mark = db.first("SELECT value FROM meta WHERE name = 'import'")
+    if mark and mark.value == 'done' then return end
+    if mark then fail('internal', 'The import mark is ' .. tostring(mark.value) .. ', not done') end
     local record = app.hub('hub.store.get', {keys = {'forwards'}}).records.forwards
-    local value = type(record) == 'table' and record.value or {}
+    -- An absent record (no value; hub.store answers {rev = '0'}) is an empty store.
+    local value = record and record.value
+    if value == nil then value = {} end
+    if type(value) ~= 'table' then fail('internal', 'The hub.store record forwards is not a table') end
     local state = {intents = {}, forwards = {}, cleanups = {}, stops = {}}
     for _, k in ipairs(M.KINDS) do
-      for key, x in pairs(value[k.field] or {}) do state[k.field][key] = x end
+      -- A missing kind is empty; a kind that is there must be a table (false or a scalar fails).
+      local list = value[k.field]
+      if list ~= nil and type(list) ~= 'table' then fail('internal', 'The hub.store record has ' .. k.field .. ' that is not a table') end
+      for key, x in pairs(list or {}) do state[k.field][key] = x end
     end
     for profile, c in pairs(state.cleanups) do
       if type(c) == 'table' and c.phase == 'sending' and c.fence_v == nil then
