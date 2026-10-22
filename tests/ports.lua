@@ -94,6 +94,37 @@ local function wait_port(session, port) return wait('port ' .. port .. ' in the 
 local a, b = session('ports-a'), session('ports-b')
 local la, lb = listen(a, base), listen(b, base + 1)
 
+test('scan: 3000 descendant PIDs reach lsof in one -p list', function()
+  -- Rex Lua: table.concat of more than about 2559 items fails with "registry overflow" (observed on
+  -- Rex 0.0.1792158932-g88fd41, lab, 2026-10-22; LazyRex docs/rex-protocol.md).
+  local seen = {}
+  local api = {}
+  function api.call(method)
+    if method == 'session.list' then return {sessions = {{session_id = 's'}}} end
+    if method == 'session.view' then return {windows = {}} end
+    if method == 'session.list_blocks' then return {blocks = {{creator_name = 'com.superlogical.terminal', block_id = 'b', window_id = 'w'}}} end
+    if method == 'com.superlogical.terminal.process' then return {child = {pid = 10}} end
+    return {}
+  end
+  function api.exec(argv)
+    if argv[1] == '/bin/ps' then
+      local lines = {'10 1 shell'}
+      for i = 1, 3000 do lines[#lines + 1] = (10000 + i) .. ' 10 worker' end
+      local out = {}
+      for i = 1, #lines, 500 do out[#out + 1] = table.concat(lines, '\n', i, math.min(i + 499, #lines)) end
+      return {ok = true, stdout = table.concat(out, '\n') .. '\n'}
+    end
+    seen.pids = argv[5]
+    return {ok = true, stdout = 'p10001\ncworker\nn127.0.0.1:3000\n'}
+  end
+  local r = ports.scan('s', api)
+  expect(#r.warnings, r.warnings[1]).to_be(0)
+  expect(#r.ports).to_be(1)
+  local n = 0
+  for _ in seen.pids:gmatch('[^,]+') do n = n + 1 end
+  expect(n).to_be(3001)
+end)
+
 test('a descendant listener belongs to its pane; the given session sorts first', function()
   wait_port(b, la.port)
   local r = wait('both listeners', function() local x = scan(b); return row(x, lb.port) and row(x, la.port) and x end, 15)
