@@ -14,10 +14,12 @@ local alice = agent('alice')
 local S = session('tunnels-recovery')
 local pane = T.shell(S, 'work')
 
-local function fingerprint(p, session_id) local o = tostring(p); return 'forward/5:other/' .. #o .. ':' .. o .. '/' .. session_id end
+-- fingerprint answers the forward-v2 fingerprint of the form's Other port… p from pane source of session_id.
+local function part(v) v = tostring(v); return #v .. ':' .. v .. '/' end
+local function fingerprint(p, session_id, source) return 'forward-v2/' .. part('other') .. part(session_id) .. part(source or '') .. part(p) end
 local function intent(id, p, session_id, source)
   return {session_id = session_id, source_block = source, port = p, target = '127.0.0.1:' .. p, profile = T.prefix .. p,
-    fingerprint = fingerprint(p, session_id), created = os.date('!%Y-%m-%dT%H:%M:%SZ'), saved_at = os.time() - 1,
+    fingerprint = fingerprint(p, session_id, source), created = os.date('!%Y-%m-%dT%H:%M:%SZ'), saved_at = os.time() - 1,
     phase = 'sending', creator = {kind = 'user'}}
 end
 local function save(f) T.edit(function(v) v.intents = v.intents or {}; v.cleanups = v.cleanups or {}; f(v) end) end
