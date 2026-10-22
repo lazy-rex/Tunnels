@@ -142,12 +142,14 @@ function M.open(app)
   end
 
   -- S.update applies f to the current catalog and saves the changes, with the operation result op
-  -- ({key, fingerprint, result}) if given, in one transaction. If op.key has a saved result, nothing
-  -- changes and it answers {op_exists = <saved>}. An error in f changes nothing.
+  -- ({key, fingerprint, result}) if given, in one transaction. If op.key has a saved result with the
+  -- same fingerprint, nothing changes and it answers {op_exists = <saved>}; with another fingerprint it
+  -- fails with operation_conflict. An error in f changes nothing.
   function S.update(f, op)
     return db.transaction(function()
       if op then
         local saved = S.op(op.key)
+        if saved.found and saved.fingerprint ~= op.fingerprint then fail('operation_conflict', 'This key has different content') end
         if saved.found then return {op_exists = saved} end
       end
       local state = S.catalog()

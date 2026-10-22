@@ -15,7 +15,8 @@
 -- The store (tunnels_store.lua) is a fake over s.catalog and s.ops with the same calls: catalog, op
 -- and update. Each update counts one write in s.rev. s.before_batch(s), if set, runs once at the start
 -- of the next update, as another writer that commits before the plugin's transaction. An update whose
--- op key is saved answers op_exists and changes nothing. hub.identify answers the
+-- op key is saved answers op_exists (the same fingerprint) or fails with operation_conflict, and changes
+-- nothing. hub.identify answers the
 -- agent alice. server.whoami answers pid 4242. A full process read (/bin/ps -axww) lists s.processes (lines
 -- "<pid> <command>"; opts.processes, default only the plugin, pid 4242).
 return function(plugin_dir, base, opts)
@@ -110,6 +111,7 @@ return function(plugin_dir, base, opts)
     local hook = s.before_batch
     s.before_batch = nil
     if hook then hook(s) end
+    if op and s.ops[op.key] and s.ops[op.key].fingerprint ~= op.fingerprint then error({code = 'operation_conflict', message = 'This key has different content'}, 0) end
     if op and s.ops[op.key] then return {op_exists = store.op(op.key)} end
     local state = store.catalog()
     f(state)
