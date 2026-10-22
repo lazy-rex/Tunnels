@@ -69,7 +69,6 @@ end
 -- A hub or Rex error keeps its code: a refusal is final. Only a lost or timed-out call is
 -- unavailable, so the caller retries it (the SDK, app.hub and app.rex).
 local hub, rex_ok = app.hub, app.rex
-local function invalidate() pcall(hub, 'hub.ui.invalidate', {}) end
 local function message(err) return type(err) == 'table' and (err.message or err.code) or tostring(err) end
 
 -- Port discovery is Codex's module. The form scans once per session and keeps the result until
@@ -427,7 +426,7 @@ local function advance_cleanups()
         elseif result.ok then
           cleanup_errors[profile] = nil
           update(function(s) if s.cleanups[profile] and s.cleanups[profile].block_id == c.block_id then s.cleanups[profile] = nil end end)
-          invalidate()
+          app.refresh()
         else
           cleanup_errors[profile] = result.error
           set_cleanup(profile, function(x) if x.block_id == c.block_id then x.phase, x.block_id, x.result, x.retry_at = 'retry', nil, nil, now + 5 end end)
@@ -450,7 +449,7 @@ local function advance_cleanups()
           if open then
             cleanup_errors[profile] = nil
             update(function(s) if s.cleanups[profile] and s.cleanups[profile].key == c.key then s.cleanups[profile] = nil end end)
-            invalidate()
+            app.refresh()
           else cleanup_errors[profile] = shut end
         elseif owner == 'script' then
           -- A script claim without a valid exit file: the attempt may still run down. Retry only
@@ -569,7 +568,7 @@ local function reconcile()
         if fw then s.cleanups[fw.profile] = s.cleanups[fw.profile] or {phase = 'new'}; s.forwards[block_id] = nil end
       end
     end)
-    invalidate()
+    app.refresh()
   end
   table.sort(rows, function(a, b) return (a.fw.created or '') < (b.fw.created or '') end)
   return rows
@@ -674,7 +673,7 @@ local function stop_forward(caller, block_id, key)
     end)
   end
   local result = finish_stop(id, st)
-  invalidate()
+  app.refresh()
   kick()
   return result
 end
@@ -719,7 +718,7 @@ local function release_reservation(caller, profile, attempt, accept_risk, key)
   end
   if done.op_exists then return result_of(done.op_exists, fingerprint) end
   cleanup_errors[profile] = nil
-  invalidate()
+  app.refresh()
   kick()
   return result
 end
@@ -777,7 +776,7 @@ local function start_forward(req)
     local block = proven(by_id, label_of(id), id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
     if not block then fail('unresolved', 'The tunnel block has an unknown start result; a late Rex reply can still create it') end
     commit(id, intent, block.block_id)
-    invalidate()
+    app.refresh()
     return result_for(intent, block.block_id)
   end
   intent = req.resolve()
@@ -818,15 +817,15 @@ local function start_forward(req)
       -- replays the error.
       local result = {error = {code = e.code, message = e.message}}
       update(function(s) s.intents[id] = nil end, {key = id, fingerprint = intent.fingerprint, result = result})
-      invalidate()
+      app.refresh()
       fail(e.code, e.message)
     end
     -- The outcome can be unknown. The intent stays; the panel shows it and looks for its label.
-    invalidate()
+    app.refresh()
     fail('unavailable', 'Rex did not confirm the tunnel block: ' .. message(err))
   end
   commit(id, intent, created.block_id)
-  invalidate()
+  app.refresh()
   kick()
   return result_for(intent, created.block_id)
 end
@@ -922,7 +921,7 @@ local function panel_action(args)
   else
     fail('invalid_input', 'Unknown Tunnels action')
   end
-  invalidate()
+  app.refresh()
   return {}
 end
 
@@ -988,7 +987,7 @@ end
 local refresh_timer
 local function arm_refresh(delay)
   if refresh_timer then return end
-  refresh_timer = rex.after(delay, function() refresh_timer = nil; invalidate() end)
+  refresh_timer = rex.after(delay, function() refresh_timer = nil; app.refresh() end)
 end
 local function render_panel()
   local ok, rows = pcall(reconcile)
@@ -1079,7 +1078,7 @@ local function ports_for(session_id, args)
     session_id = args.session_id
   end
   local result = rescan(session_id)
-  invalidate()
+  app.refresh()
   local ports = {}
   for i, p in ipairs(result.ports or {}) do
     local entry = {}
@@ -1101,7 +1100,7 @@ local function perform(args)
   if args.route == '/forms/forward' and args.node_id == 'rescan' then
     local ctx = type(args.context) == 'table' and args.context or {}
     rescan(ctx.session_id)
-    invalidate()
+    app.refresh()
     return {}
   end
   if tostring(args.route):sub(1, 15) == '/forms/release?' and args.node_id == 'release' and args.action == 'release' then return release_form(args) end
@@ -1181,7 +1180,7 @@ app.command({id = 'forward_port', title = 'Forward Port…', description = 'Shar
   action = 'tunnels.forward'})
 -- A tunnel block that exits or closes, or a closed session, changes the panel.
 for _, event in ipairs({'terminal.child_exited', 'block_closed', 'session_closed'}) do
-  app.on(event, function() invalidate(); kick() end, {tx = false})
+  app.on(event, function() app.refresh(); kick() end, {tx = false})
 end
 -- Work left by an earlier instance (a pending cleanup, a forward whose session closed) goes on now.
 kick()
