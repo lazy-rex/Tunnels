@@ -1038,7 +1038,9 @@ local function render_panel()
     nodes[#nodes + 1] = node
   end
   if #rows == 0 and #pending == 0 and ok then nodes[#nodes + 1] = {id = 'empty', type = 'widget', text = 'No ports are forwarded.'} end
-  if #rows > 0 or #pending > 0 then arm_refresh((running < #rows or #pending > 0) and 2 or 15) end
+  -- A failed read renders the panel again in 5 s: no event comes when the read works again.
+  if not ok or not cok then arm_refresh(5)
+  elseif #rows > 0 or #pending > 0 then arm_refresh((running < #rows or #pending > 0) and 2 or 15) end
   kick()
   nodes[#nodes + 1] = {id = 'new', type = 'widget', text = 'Forward a port from a pane', action = {name = 'new', label = 'Forward Port…', enabled = true, user_only = 'navigation'}}
   return {title = running > 0 and ('Tunnels (' .. running .. ' connected)') or 'Tunnels', nodes = nodes}

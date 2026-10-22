@@ -59,3 +59,20 @@ test('stop the forward', function()
   expect(r.stopped).to_be(true)
   wait('no tunnel block', function() return #T.tunnel_blocks(S) == 0 end, 20)
 end)
+
+test('an open panel recovers by itself after a failed read of the catalog', function()
+  -- No forward and no cleanup, so the panel arms no refresh timer. A timer that an earlier render
+  -- armed fires within 15 s; wait it out. Then a gate makes each hub.store.get fail.
+  wait('no cleanup is pending', function() return next(T.catalog().cleanups or {}) == nil end, 30)
+  local v = T.open_panel(web)
+  wait('the panel is empty', function() local ok, n = pcall(node, v:render(), 'empty'); return ok and n ~= nil end, 10)
+  rex.sleep(16)
+  local gate = fault({point = 'action', action = 'hub.store.get', when = 'before', mode = 'gate', plugin = 'tunnels'})
+  v:render()
+  wait('the panel shows the read error', function() local ok, n = pcall(node, shown(v), 'error'); return ok and n ~= nil end, 10)
+  fault_release(gate)
+  wait('the panel recovers with no render from the test', function()
+    local ok, n = pcall(node, shown(v), 'empty')
+    return ok and n ~= nil
+  end, 20)
+end)
