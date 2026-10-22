@@ -11,6 +11,15 @@ local function infrastructure(label)
   end
   return false
 end
+-- join is table.concat in blocks of 1000 items: Rex Lua fails table.concat of more than about 2559
+-- items with "registry overflow" (observed on Rex 0.0.1792158932-g88fd41, lab, 2026-10-22; LazyRex
+-- docs/rex-protocol.md).
+local function join(list, sep)
+  if #list <= 1000 then return table.concat(list, sep) end
+  local blocks = {}
+  for i = 1, #list, 1000 do blocks[#blocks + 1] = table.concat(list, sep, i, math.min(i + 999, #list)) end
+  return join(blocks, sep)
+end
 local function pid(value)
   local n = tonumber(value)
   if n and n > 0 and n == math.floor(n) then return n end
@@ -109,7 +118,7 @@ function M.scan(current_session, api)
   -- An empty -p selection must never become a machine-wide listener scan.
   if #selected == 0 then return result end
   local sockets
-  sockets, err = api.exec({'/usr/sbin/lsof', '-nP', '-a', '-p', table.concat(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn'}, {timeout = 3})
+  sockets, err = api.exec({'/usr/sbin/lsof', '-nP', '-a', '-p', join(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn'}, {timeout = 3})
   if not sockets then warn('lsof: ' .. detail(err)); return result end
   -- lsof exits 1 when no selected process has a listening socket.
   if sockets.timed_out or (not sockets.ok and sockets.code ~= 1) then
