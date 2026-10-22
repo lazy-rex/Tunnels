@@ -13,7 +13,9 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 Tunnels uses the LazyRex Plugin SDK (`lazyrex.json` `"sdk": "0"`; LazyRex `docs/plugin-sdk.md`). The hub
 starts it through the SDK launcher, so it needs a hub with that launcher. The SDK does the
 registration, the dispatch of agent and view calls, the caller checks and the error replies.
-Tunnels keeps its own state and operation records in hub.store (`tx = false`, `store = false`).
+Tunnels keeps its own state and operation records in its SQL tables (`tunnels_store.lua`). Each write is
+its own transaction, so a handler holds no transaction while it waits for Rex (`tx = false`,
+`store = false`).
 
 The plugin loads its other files from its own directory, so keep them together.
 
@@ -120,32 +122,10 @@ lazyrex-hub test
 The shared LazyRex renderer tests (view package) cover the generic keyboard, focus and screen
 behavior of the forms and panels.
 
-### Known issue: stop.lua count failures
+### Test writes
 
-During the port, one run of `tests/stop.lua` failed once on a count check (the second count). That
-run kept no lab, so nobody could inspect it. Its cause is still not known.
-
-A later failure has a credible cause (observed on Rex 0.0.1792158932-g88fd41, lab, 2026-10-19: 1
-failure in 11 runs at HEAD 0499236). The runs used a mutable checkout, so they were not isolated;
-the source identity rests on the implementer's timeline. The test "an agent stops a user forward, ..." counted 2
-cleanup `down` runs for one forward, not 1. The strict helper (3f76a4a) read the count correctly.
-
-- Cause (inferred from the order of record revisions in the hub log; the log has no record
-  content): the test changes the `forwards` record with a read, a change and `write()`. `write()`
-  had no revision check then. A plugin commit came between the read and the
-  write, so the write probably put back an old cleanup record, and the plugin ran `down` again.
-- The unconditional test write can overwrite concurrent plugin changes; this is the suspected cause
-  of this failure. The log does not show what the write overwrote, so a plugin defect is not ruled
-  out.
-- The same read-change-write pattern was in `tests/stop.lua`, `tests/errors.lua`, `tests/recovery.lua`
-  and `tests/agent-forward.lua`. Fixed (3a39937): every such test write now goes through `T.edit`,
-  which writes with the revision it read (`if_rev`, LazyRex hub 415a612 and later). After a
-  conflict it reads the fresh record and applies the change again.
-
-After the fix, `tests/stop.lua` passed 50 of 50 runs (observed on Rex 0.0.1792158932-g88fd41, lab,
-2026-10-19). Each run started its own lab from a read-only `git archive` of Tunnels bff992b, with
-the LazyRex hub at 6f68bcc. Short probe labs ran in parallel during runs 18 to 24. This result
-does not show that the first failure (the one without a lab) had the same cause.
-
-If `tests/stop.lua` fails on a count, keep the lab (`lazyrex-hub test -keep`) and record the helper
-error and the order of `hub.test.store`, `hub.store.batch` and `hub.test.write` in `hub.log` here.
+A test changes the state as another writer only through `T.edit` (`tests/lib/tunnels.lua`). It
+writes a row only if the row is still as it read it, so it never overwrites a plugin commit that
+came between its read and its write. If a test fails on a count, keep the lab
+(`lazyrex-hub test -keep`) and record the helper error and the order of the `hub.sql` commits in
+`hub.log` here.

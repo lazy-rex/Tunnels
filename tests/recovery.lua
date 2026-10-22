@@ -4,7 +4,7 @@
 -- intent. Otherwise the intent stays pending and keeps its port until its session closes. A cleanup
 -- with an unknown create result keeps its profile, also across a restart. Ported from
 -- tests/tunnels-cleanup-contract.lua (real hub instead of a fake Rex) and the plugin header rules.
--- The intents and cleanups are written with write(), as a plugin that lost a reply leaves them.
+-- The intents and cleanups are written with T.edit (SQL, as another writer), as a plugin that lost a reply leaves them.
 
 local tests_dir = debug.getinfo(1, 'S').source:match('^@?(.*)/[^/]*$')
 dofile(tests_dir .. '/lib/guard.lua')(tests_dir)

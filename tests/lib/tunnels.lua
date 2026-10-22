@@ -48,25 +48,78 @@ return function(E, tests_dir)
     end
     return list
   end
-  function T.catalog() return E.store('forwards').value or {} end
-  -- edit changes the forwards record as another writer: it reads the value and its revision, calls
-  -- f(value), and writes the value back with that revision (if_rev). A plugin commit in between
-  -- makes the write fail with conflict; then edit reads again and calls f again on the fresh
-  -- value, so f must only change the value it gets. Other errors raise. A local that f captured and
-  -- changes can read stale in the caller after the caught conflict (LazyRex docs/rex-protocol.md,
-  -- "Rex Lua runtime"); keep such state in a table field. between (tests of edit
-  -- only) runs after the first read and before the first write. It answers the written value.
+  -- The state is in the plugin's SQL tables (tunnels_store.lua). T.catalog reads it with the plugin's
+  -- own catalog statement, so a test sees the same Lua shapes as the plugin.
+  local store = dofile(T.plugin_dir .. '/tunnels_store.lua')
+  local NULL = {null = true}
+  local function same(a, b)
+    if type(a) ~= 'table' or type(b) ~= 'table' then return a == b end
+    for k, v in pairs(a) do if not same(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+  end
+  local function copy(v)
+    if type(v) ~= 'table' then return v end
+    local r = {}
+    for k, x in pairs(v) do r[k] = copy(x) end
+    return r
+  end
+  local function read() return store.state_of(E.sql(store.CATALOG), rex.json.decode) end
+  function T.catalog() return (read()) end
+  -- put writes one changed row of kind k as another writer, only if the row is still as it was read
+  -- (raw: its JSON text; nil for a new row). It answers false when another commit changed the row.
+  local function put(k, key, record, raw)
+    local names, values = store.values_of(k, key, record, rex.json.encode, function(_, m) error(m, 2) end)
+    local params = {}
+    for i = 1, #names do params[i] = values[i] == nil and NULL or values[i] end
+    if raw == nil then
+      local marks = {}
+      for i = 1, #names do marks[i] = '?' .. i end
+      return (pcall(E.sql_write, 'INSERT INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', params))
+    end
+    local sets = {}
+    for i = 2, #names do sets[#sets + 1] = names[i] .. ' = ?' .. i end
+    params[#names + 1] = raw
+    return E.sql_write('UPDATE ' .. k.field .. ' SET ' .. table.concat(sets, ', ') .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?' .. (#names + 1), params).changes == 1
+  end
+  -- edit changes the state as another writer: it reads the catalog, calls f(value), and writes each
+  -- changed row only if that row is still as it was read. A plugin commit in between that changed
+  -- such a row makes edit read again and call f again on the fresh value, so f must only change the
+  -- value it gets (a row written before the conflict stays written; f gives it the same value again).
+  -- A field that the schema does not have raises. A local that f captured and changes can read stale
+  -- in the caller after a caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime"); keep such
+  -- state in a table field. between (tests of edit only) runs after the first read and before the
+  -- first write. It answers the written value.
   function T.edit(f, between)
     for attempt = 1, 10 do
-      local r = E.store('forwards')
-      local value = r.value or {}
+      local value, raw = read()
+      local before = copy(value)
       f(value)
+      for field in pairs(value) do
+        if not raw[field] and field ~= 'fence' then error('edit: the state has no field ' .. tostring(field), 2) end
+      end
       if attempt == 1 and between then between() end
-      local ok, err = pcall(E.write, {{key = 'forwards', value = value, if_rev = r.rev}})
-      if ok then return value end
-      if not (type(err) == 'table' and err.code == 'conflict') then error(err, 0) end
+      local done = true
+      for _, k in ipairs(store.KINDS) do
+        local old, new = before[k.field], value[k.field] or {}
+        for key in pairs(old) do
+          if new[key] == nil and E.sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?2', {key, raw[k.field][key]}).changes ~= 1 then done = false end
+        end
+        for key, record in pairs(new) do
+          if not same(old[key], record) and not put(k, key, record, raw[k.field][key]) then done = false end
+        end
+      end
+      if value.fence ~= before.fence then
+        if value.fence == nil then E.sql_write("DELETE FROM meta WHERE name = 'fence'")
+        else E.sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', ?1)", {value.fence}) end
+      end
+      if done then return value end
     end
-    error('edit: the forwards record kept changing', 2)
+    error('edit: the state kept changing', 2)
+  end
+  -- put_operation saves an operation result as an older plugin version did: {key, fingerprint, result}.
+  function T.put_operation(op)
+    E.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', {op.key, op.fingerprint, rex.json.encode(op.result)})
   end
   function T.cleanups() local c = {}; for profile in pairs(T.catalog().cleanups or {}) do c[#c + 1] = profile end; table.sort(c); return c end
   function T.blocks(session)

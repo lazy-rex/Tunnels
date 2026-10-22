@@ -4,18 +4,18 @@
 --   local s = sandbox(plugin_dir, base_env, {vars = {...}, executables = {[path] = true},
 --     catalog = <forwards record value>, ops = {[key] = {fingerprint, result}}, ps = function(argv) return result end,
 --     rex = {[method] = function(args) return result, err end}})
--- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
+-- It answers the stub state: the event handlers, the last reply, the new_block calls, the hub actions
+-- that the plugin called (hub_calls), the saved
 -- catalog, the saved operation records (ops), and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
--- s:tick() runs the timers that the plugin set. The SDK registration timer has run at load, so the
--- plugin is registered before a test sends a request, as on the hub. os.exit sets s.exited.
+-- s:tick() runs the timers that the plugin set. The registration timer has run at load.
 -- s.fs is a small file system in memory for the cleanup fence: path -> {dir = true}, {link = target}
 -- or {data = text}. The stub answers /bin/test -d, /bin/mkdir [-p], /bin/ln -s, /usr/bin/readlink
 -- and /bin/cat from it. opts.fs gives the start state; opts.exec(argv) answers a call first, when it
 -- returns a result (for failures that the file system cannot show).
--- The stub store keeps a revision (s.rev): a batch with an older if_rev answers a revision conflict
--- and counts it in s.conflicts. s.before_batch(s), if set, runs once at the start of the next batch,
--- so a test can change the record between the plugin's read and its write. A batch whose op key is
--- saved answers op_exists (same fingerprint) or an operation conflict. hub.identify answers the
+-- The store (tunnels_store.lua) is a fake over s.catalog and s.ops with the same calls: catalog, op
+-- and update. Each update counts one write in s.rev. s.before_batch(s), if set, runs once at the start
+-- of the next update, as another writer that commits before the plugin's transaction. An update whose
+-- op key is saved answers op_exists and changes nothing. hub.identify answers the
 -- agent alice. server.whoami answers pid 4242. A full process read (/bin/ps -axww) lists s.processes (lines
 -- "<pid> <command>"; opts.processes, default only the plugin, pid 4242).
 return function(plugin_dir, base, opts)
@@ -24,8 +24,8 @@ return function(plugin_dir, base, opts)
   if vars.HOME == nil then vars.HOME = '/sandbox/home' end
   -- The stub keeps its state in fields of s: a closure that reassigns a captured local can write a
   -- detached copy after a caught error (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
-  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, catalog = opts.catalog or {}, ops = opts.ops or {}, fs = opts.fs or {},
-    processes = opts.processes or {'4242 /usr/local/bin/rex do tunnels.lua'}, rev = 1, conflicts = 0}
+  local s = {handlers = {}, creates = {}, execs = {}, timers = {}, hub_calls = {}, catalog = opts.catalog or {}, ops = opts.ops or {}, fs = opts.fs or {},
+    processes = opts.processes or {'4242 /usr/local/bin/rex do tunnels.lua'}, rev = 1}
   local function parent(path) return path:match('^(.*)/[^/]+$') end
   local function copy(v)
     if type(v) ~= 'table' then return v end
@@ -81,30 +81,7 @@ return function(plugin_dir, base, opts)
     call = function(method, args)
       if overrides[method] then return overrides[method](args) end
       if method == 'client.perform' then
-        -- A copy, as from the hub: a change that the plugin does not write must not reach the store.
-        if args.action == 'hub.store.get' then return {result = {records = {forwards = {rev = tostring(s.rev), value = copy(s.catalog)}}}} end
-        if args.action == 'hub.store.op' then
-          local op = s.ops[args.args.key]
-          if op then return {result = {found = true, fingerprint = op.fingerprint, result = op.result}} end
-          return {result = {found = false}}
-        end
-        if args.action == 'hub.store.batch' then
-          -- As the hub: a saved op first, then the revision condition.
-          local hook = s.before_batch
-          s.before_batch = nil
-          if hook then hook(s) end
-          local op = args.args.op and s.ops[args.args.op.key]
-          if op and op.fingerprint == args.args.op.fingerprint then return {result = {op_exists = {fingerprint = op.fingerprint, result = op.result}}} end
-          if op then return {result = {conflict = {kind = 'operation', key = args.args.op.key}}} end
-          local write = args.args.ops[1]
-          if write.if_rev and write.if_rev ~= tostring(s.rev) then s.conflicts = s.conflicts + 1; return {result = {conflict = {kind = 'revision', key = 'forwards'}}} end
-          s.catalog, s.rev = write.value, s.rev + 1
-          if args.args.op then s.ops[args.args.op.key] = args.args.op end
-          return {result = {revs = {forwards = tostring(s.rev)}}}
-        end
-        -- The limits that the hub sends (hub/cmd/hub/replyparts.go, partsLimits, hub main cd53575): the
-        -- SDK takes them from the hub.register reply and fails its start without them.
-        if args.action == 'hub.register' then return {result = {generation = '1', limits = {inline_max = 45056, part_bytes = 57344, max_total = 786432}}} end
+        s.hub_calls[#s.hub_calls + 1] = args.action
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 's'}} end
         return {result = {}}
       end
@@ -116,7 +93,34 @@ return function(plugin_dir, base, opts)
       return {}
     end,
   }
-  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end, exit = function(code) s.exited = code end}, {__index = os})}, {__index = base})
+  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end}, {__index = os})}, {__index = base})
+  -- The fake store answers copies: a change that the plugin does not write must not reach s.catalog.
+  local store = {}
+  function store.catalog()
+    local c = copy(s.catalog)
+    c.intents, c.forwards, c.cleanups, c.stops = c.intents or {}, c.forwards or {}, c.cleanups or {}, c.stops or {}
+    return c
+  end
+  function store.op(key)
+    local op = s.ops[key]
+    if op then return {found = true, fingerprint = op.fingerprint, result = copy(op.result)} end
+    return {found = false}
+  end
+  function store.update(f, op)
+    local hook = s.before_batch
+    s.before_batch = nil
+    if hook then hook(s) end
+    if op and s.ops[op.key] then return {op_exists = store.op(op.key)} end
+    local state = store.catalog()
+    f(state)
+    s.catalog, s.rev = state, s.rev + 1
+    if op then s.ops[op.key] = copy(op) end
+    return {}
+  end
+  env.dofile = function(path)
+    if path:match('/tunnels_store%.lua$') then return {open = function() return store end} end
+    return base.dofile(path)
+  end
   -- The LazyRex SDK, loaded fresh with the stub rex (its state is per plugin): sdk/lua of the LazyRex
   -- checkout that runs the tests (H.args.sdk, else beside H.args.lib = <checkout>/lab/test).
   local args = base.H and base.H.args or {}
@@ -129,9 +133,6 @@ return function(plugin_dir, base, opts)
   local chunk = assert(loadfile(plugin_dir .. '/tunnels.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)
-  -- The SDK sets its registration timer first, in require('lazyrex').plugin() at the top of tunnels.lua:
-  -- run only that one now. The plugin's own timers wait for s:tick(), as before.
-  if s.loaded and s.timers[1] then table.remove(s.timers, 1)() end
   function s:perform(action, args)
     self.reply = nil
     self.handlers.client_perform_requested({}, {requester = {client_id = 'hub'}, action = action, call_id = 'c', args = args})
@@ -143,5 +144,8 @@ return function(plugin_dir, base, opts)
     self.timers = {}
     for _, fn in ipairs(due) do fn() end
   end
+  -- The SDK registration timer runs at load: the migrations, the start functions (the start kick of
+  -- maintenance) and hub.register. So the first s:tick() of a test runs the start maintenance.
+  if s.loaded then s:tick() end
   return s
 end

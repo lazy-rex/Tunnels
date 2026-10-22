@@ -18,9 +18,9 @@ local source = rex.call('session.list_blocks', {session_id = S}).blocks[1].block
 local function part(v) return #v .. ':' .. v .. '/' end
 local function stop_key(agent_id, key) return 'stop/' .. part('agent') .. part(agent_id) .. part(key) end
 
-local function catalog() return store('forwards').value or {} end
 -- down_calls counts the `down` calls of port p's profile in the fake's call log (lib/tunnels.lua).
 local T = dofile(tests_dir .. '/lib/tunnels.lua')(getfenv(1), tests_dir)
+local catalog = T.catalog
 local down_calls = T.down_calls
 local function blocks() local by_id = {}; for _, b in ipairs(rex.call('session.list_blocks', {session_id = S}).blocks) do by_id[b.block_id] = b end; return by_id end
 local function listed(id) for _, f in pairs(alice:call('tunnels.list', {}).forwards or {}) do if f.id == id then return f end end end
@@ -140,7 +140,7 @@ test('a failed intent save closes no block', function()
   local p = port()
   local f = seed(p, 'alice')
   quiet()
-  with_injection({match = {writes = 'forwards'}, fail = 'lost connection', times = 1}, 1, function()
+  with_injection({match = {sql_commit_writes = 'stops'}, fail = 'lost connection', times = 1}, 1, function()
     expect_error(function() alice:call('tunnels.stop', {forward = f, key = 'save-fails'}) end, 'lost connection')
   end)
   assert_true(blocks()[f], 'the block still runs')
@@ -153,7 +153,7 @@ end)
 test('a failed final batch: maintenance finishes the stop; the key replays after the port is reused', function()
   local p = port()
   local f = seed(p, 'alice')
-  with_injection({match = {op_key = stop_key('alice', 'final-fails')}, fail = 'lost connection', times = 1}, 1, function()
+  with_injection({match = {sql_commit_writes = 'ops', sql_param = stop_key('alice', 'final-fails')}, fail = 'lost connection', times = 1}, 1, function()
     expect_error(function() alice:call('tunnels.stop', {forward = f, key = 'final-fails'}) end, 'lost connection')
   end)
   expect(blocks()[f]).to_be(nil)
@@ -202,7 +202,7 @@ test('a stop that finishes after another keeps the port reserved and adds no sec
   local ka, kb = stop_key('alice', 'held-a'), stop_key('bob', 'held-b')
   -- Bob's final batch fails ten times (one per maintenance pass, about one per second), so his
   -- saved stop outlives Alice's; then it finishes through finish_stop with the forward gone.
-  inject({match = {op_key = kb}, fail = 'held', times = 10})
+  inject({match = {sql_commit_writes = 'ops', sql_param = kb}, fail = 'held', times = 10})
   T.edit(function(value)
     value.stops = value.stops or {}
     value.stops[ka] = saved_stop(f, p)
@@ -244,25 +244,22 @@ test('a saved stop resumes after a plugin restart and replays', function()
 end)
 
 test('T.edit keeps a plugin commit that comes between its read and its write', function()
-  -- write() with if_rev (LazyRex docs/testing.md): the stale write fails with conflict, and T.edit
-  -- applies its change again on the fresh record. Without if_rev, this write would put the stopped
-  -- forward back (README, known issue).
+  -- T.edit writes a row only if it is as T.edit read it (lib/tunnels.lua). The stale write changes
+  -- no row, and T.edit applies its change again on the fresh state. A plain write would put the
+  -- stopped forward back.
   local p = port()
   local f = seed(p, 'alice')
   -- The count is a table field: Rex Lua detaches a local that a closure captured before a caught
-  -- error (T.edit catches the conflict; LazyRex docs/rex-protocol.md, "Rex Lua runtime"), so a
-  -- plain local would read 1 here.
+  -- error (LazyRex docs/rex-protocol.md, "Rex Lua runtime"), so a plain local can read stale here.
   local calls = {n = 0}
-  T.edit(function(value) calls.n = calls.n + 1; value.test_marker = 'edit-' .. p end, function()
+  T.edit(function(value)
+    calls.n = calls.n + 1
+    if value.forwards[f] then value.forwards[f].url = 'https://edit-' .. p .. '.example' end
+  end, function()
     -- A plugin commit between the read and the write: the stop removes the forward.
     expect(alice:call('tunnels.stop', {forward = f, key = 'between-' .. p})).to_equal({forward = f, stopped = true})
   end)
-  -- At least one conflict (the stop). The stop's cleanup can commit again during the retry, so
-  -- more tries are correct too.
   assert_true(calls.n >= 2, 'the edit ran again after the conflict: ' .. calls.n .. ' call(s)')
-  local value = catalog()
-  expect(value.test_marker).to_be('edit-' .. p)
-  expect((value.forwards or {})[f], 'the plugin change stays').to_be(nil)
-  T.edit(function(v) v.test_marker = nil end)
+  expect(catalog().forwards[f], 'the plugin change stays').to_be(nil)
   no_cleanup_for(p)
 end)

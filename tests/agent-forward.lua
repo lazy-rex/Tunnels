@@ -38,7 +38,7 @@ local ids = {}
 test('a failed intent save starts no block and saves no intent; the key then works', function()
   local p = T.port()
   quiet()
-  with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
+  with_injection({match = {sql_commit_writes = 'intents'}, fail = 'refused write', times = 1}, 1, function()
     local e = expect_error(function() alice:call('tunnels.forward', {key = 'save-fails', port = p, session_id = S}) end, 'refused write')
     expect(e.code).to_be('injected_failure')
   end)
@@ -174,7 +174,7 @@ test('a saved stop or cleanup reserves its port on the tool path', function()
   save(function(v) v.cleanups[T.prefix .. p] = {phase = 'sending', key = 'held-' .. p, saved_at = os.time() + 3600} end)
   expect_error(function() alice:call('tunnels.forward', {key = 'held-1', port = p, session_id = S}) end, 'still stopping')
   -- An injection holds the final batch of the saved stop, so maintenance cannot end it first.
-  local held = inject{match = {op_key = 'held-stop-' .. p}, fail = 'held', times = 'always'}
+  local held = inject{match = {sql_commit_writes = 'ops', sql_param = 'held-stop-' .. p}, fail = 'held', times = 'always'}
   save(function(v) v.cleanups[T.prefix .. p] = nil; v.stops['held-stop-' .. p] = {forward = 'block:gone', session_id = S, port = p, profile = T.prefix .. p, fingerprint = 'x', saved_at = os.time()} end)
   expect_error(function() alice:call('tunnels.forward', {key = 'held-2', port = p, session_id = S}) end, 'still stopping')
   cancel_injection(held)
@@ -211,7 +211,7 @@ end)
 test('a legacy user operation key that looks like an agent key is not an agent operation', function()
   local p = T.port()
   -- Legacy user keys have no '/'. This one spells the agent framing with other separators.
-  put_operation{key = 'fwd.' .. #ids.alice .. ':' .. enc(ids.alice) .. '.6:legacy.', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
+  T.put_operation{key = 'fwd.' .. #ids.alice .. ':' .. enc(ids.alice) .. '.6:legacy.', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
   local r = alice:call('tunnels.forward', {key = 'legacy', port = p, session_id = S})
   expect(r.port).to_be(p)
   expect(T.catalog().forwards[r.forward].op).to_be(agent_id(ids.alice, 'legacy'))
@@ -223,7 +223,7 @@ test('view keys: a legacy v1 record replays; a new key with another source pane 
   local p = T.port()
   local two = T.shell(S, 'two')
   -- A result saved by the plugin before forward-v2 (the v1 fingerprint has no source pane).
-  put_operation{key = 'legacy-view-' .. p, fingerprint = 'forward/5:other/' .. #tostring(p) .. ':' .. p .. '/' .. S, result = {panel = {command = 'tunnels'}}}
+  T.put_operation{key = 'legacy-view-' .. p, fingerprint = 'forward/5:other/' .. #tostring(p) .. ':' .. p .. '/' .. S, result = {panel = {command = 'tunnels'}}}
   local op = T.submit(T.open_form(pane), p, 'legacy-view-' .. p)
   expect(op.status).to_be('succeeded')
   expect(#T.tunnel_blocks(S), 'the replay started nothing').to_be(0)

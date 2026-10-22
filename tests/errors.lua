@@ -32,7 +32,7 @@ test('a refused store write ends the view operation with the hub code; the next 
   local v = T.open_panel(pane)
   wait('the row', function() return T.row(v, 'fw/' .. b) end, 10)
   quiet()
-  local op = with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
+  local op = with_injection({match = {sql_commit_writes = 'stops'}, fail = 'refused write', times = 1}, 1, function()
     local _, key = v:admit('action', {node_id = 'fw/' .. b, action = 'stop', input = {item_id = 'stop'}})
     -- The first operation read raises once, so wait catches an error during settle. The test gets
     -- op as a return value: a local that the callback set reads stale after the catch (LazyRex
@@ -62,7 +62,7 @@ test('a refused store write reaches an agent with the hub code', function()
   local p = T.port()
   local b = seed(p)
   quiet()
-  with_injection({match = {writes = 'forwards'}, fail = 'refused write', times = 1}, 1, function()
+  with_injection({match = {sql_commit_writes = 'stops'}, fail = 'refused write', times = 1}, 1, function()
     local e = expect_error(function() alice:call('tunnels.stop', {forward = b, key = 'refused'}) end, 'refused write')
     expect(e.code).to_be('injected_failure')
   end)

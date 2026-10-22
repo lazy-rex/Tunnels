@@ -107,25 +107,23 @@ test('only a legacy sending record of the same attempt is released; others refus
   expect(agent_release(s, release_args('A', 'k1')).error.code, 'no record').to_be('conflict')
 end)
 
-test('after a revision conflict the checks run on the new record (sandbox)', function()
-  -- Another writer replaces the record between the read and the write: attempt B now owns the profile.
+test('the checks run on the record that the write transaction reads (sandbox)', function()
+  -- Another writer replaced the record before the write transaction: attempt B now owns the profile.
   local s = release_sandbox(legacy('A'))
   s.before_batch = function(x) x.catalog.cleanups[PROFILE] = legacy('B'); x.rev = x.rev + 1 end
   local reply = agent_release(s, release_args('A', 'k1'))
-  expect(s.conflicts, 'the first write met a conflict').to_be(1)
   if not (reply.error and reply.error.code == 'conflict') then error('expected conflict: ' .. show(reply), 0) end
   expect(record(s).key, 'B stays').to_be('B')
   expect(next(s.ops)).to_be(nil)
-  -- The phase changes between the read and the write.
+  -- The phase changed before the write transaction.
   s = release_sandbox(legacy('A'))
   s.before_batch = function(x) x.catalog.cleanups[PROFILE].phase = 'running'; x.rev = x.rev + 1 end
   expect(agent_release(s, release_args('A', 'k1')).error.code).to_be('conflict')
   expect(record(s).phase).to_be('running')
-  -- An unrelated change: the retry keeps it and releases the record.
+  -- An unrelated change: the write keeps it and releases the record.
   s = release_sandbox(legacy('A'))
   s.before_batch = function(x) x.catalog.forwards = {b9 = {port = 9}}; x.rev = x.rev + 1 end
   expect(agent_release(s, release_args('A', 'k1')).result.released).to_be(true)
-  expect(s.conflicts).to_be(1)
   expect(record(s)).to_be(nil)
   expect(s.catalog.forwards.b9.port, 'the other change stays').to_be(9)
 end)

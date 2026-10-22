@@ -3,10 +3,10 @@
 -- process. The block runs tunnels-run.sh, which runs `opentunnel serve` in the foreground, so the
 -- block owns the tunnel: Stop closes the block, and closing the session ends the tunnel.
 --
--- State (README, "Tunnels"): one hub.store record "forwards" = {intents = {[op key] = intent},
--- forwards = {[block ID] = forward}, cleanups = {[profile] = cleanup}, stops = {[op key] = stop}}. The intent is saved as "sending" before session.new_block, and
--- the create is sent once. The forward, the intent removal and the operation result commit in one
--- batch. A label is only a discovery hint (architecture.md). An intent with an unknown create
+-- State (README, "Tunnels"): SQL tables (tunnels_store.lua), read as one catalog = {intents = {[op key] =
+-- intent}, forwards = {[block ID] = forward}, cleanups = {[profile] = cleanup}, stops = {[op key] = stop}}.
+-- The intent is saved as "sending" before session.new_block, and the create is sent once. The forward,
+-- the intent removal and the operation result commit in one transaction. A label is only a discovery hint (architecture.md). An intent with an unknown create
 -- result is adopted only with process proof: exactly one block in its session has the label
 -- lazyrex-tunnel:<op key> (label_of: a digest for an agent key), its process argv carries the op key, and the process started after the
 -- intent was saved. Otherwise the panel shows it as unknown, and it keeps its port until it is proven
@@ -95,26 +95,10 @@ local function rescan(session_id)
   return scan(session_id)
 end
 
-local function catalog()
-  local r = hub('hub.store.get', {keys = {'forwards'}}).records.forwards
-  if not r or type(r.rev) ~= 'string' then fail('internal', 'Missing forward catalog') end
-  local value = r.value or {}
-  value.intents, value.forwards, value.cleanups, value.stops = value.intents or {}, value.forwards or {}, value.cleanups or {}, value.stops or {}
-  return value, r.rev
-end
--- update applies f to the current catalog and saves it, with the operation result op if given.
--- It tries again after a revision conflict.
-local function update(f, op)
-  for _ = 1, 5 do
-    local state, rev = catalog()
-    f(state)
-    local args = {ops = {{key = 'forwards', if_rev = rev, value = state}}}
-    if op then args.op = op end
-    local result = hub('hub.store.batch', args)
-    if not result.conflict then return result end
-  end
-  fail('conflict', 'The forward list keeps changing; retry with the same key')
-end
+-- The state is in SQL (tunnels_store.lua). catalog answers the whole state; update(f, op) applies f
+-- to it and saves the changes with the operation result op, in one transaction.
+local store = dofile(plugin_dir .. '/tunnels_store.lua').open(app)
+local catalog, update = store.catalog, store.update
 
 local function valid_port(value)
   local n = tonumber(value)
@@ -506,7 +490,9 @@ end
 
 -- reconcile reads Rex and returns the panel rows. It resolves intents by their labels, records
 -- URLs, and removes forwards that have stopped. A failed Rex read raises and changes nothing.
-local function reconcile()
+-- read_only (the panel render: a render cannot write) gives the same rows and writes nothing; the
+-- render kicks maintenance, which writes the same changes.
+local function reconcile(read_only)
   local state = catalog()
   local known = sessions()
   local cache = {}
@@ -518,9 +504,10 @@ local function reconcile()
   for id, intent in pairs(state.intents) do
     local by_id = blocks(intent.session_id)
     local block = by_id and proven(by_id, label_of(id), id, intent.saved_at, intent.session_id, 'tunnels-run.sh')
-    if not by_id then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}})
+    if not by_id then
+      if not read_only then drop(id, intent, {error = {code = 'not_found', message = 'The session closed before the tunnel started'}}) end
     elseif block then
-      commit(id, intent, block.block_id)
+      if not read_only then commit(id, intent, block.block_id) end
       state.forwards[block.block_id] = {session_id = intent.session_id, source_block = intent.source_block, port = intent.port, target = intent.target, profile = intent.profile, op = id, created = intent.created, creator = intent.creator}
     else
       rows[#rows + 1] = {intent_id = id, fw = intent, state = 'Unknown start result'}
@@ -560,7 +547,7 @@ local function reconcile()
       rows[#rows + 1] = row
     end
   end
-  if next(gone) or next(urls) then
+  if not read_only and (next(gone) or next(urls)) then
     update(function(s)
       for block_id, url in pairs(urls) do if s.forwards[block_id] then s.forwards[block_id].url = url end end
       for block_id in pairs(gone) do
@@ -656,7 +643,7 @@ local function stop_forward(caller, block_id, key)
   if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
   local id = stop_key(caller, key)
   local fingerprint = 'stop-v1/' .. part(block_id)
-  local saved = hub('hub.store.op', {key = id})
+  local saved = store.op(id)
   if saved.found then return result_of(saved, fingerprint) end
   local state = catalog()
   local st = state.stops[id]
@@ -699,7 +686,7 @@ local function release_reservation(caller, profile, attempt, accept_risk, key)
   if type(key) ~= 'string' or key == '' or #key > 200 then fail('invalid_input', 'key is required') end
   local id = release_key(caller, key)
   local fingerprint = 'release-v1/' .. part(profile) .. part(attempt)
-  local saved = hub('hub.store.op', {key = id})
+  local saved = store.op(id)
   if saved.found then return result_of(saved, fingerprint) end
   local result = {released = true, profile = profile, attempt = attempt}
   -- update runs the check on each read, so it holds again after a revision conflict. The record
@@ -712,7 +699,7 @@ local function release_reservation(caller, profile, attempt, accept_risk, key)
   end, {key = id, fingerprint = fingerprint, result = result})
   if not ok then
     -- Another invocation of the same key can have committed first.
-    local again = hub('hub.store.op', {key = id})
+    local again = store.op(id)
     if again.found then return result_of(again, fingerprint) end
     error(done, 0)
   end
@@ -760,7 +747,7 @@ end
 -- The replay lookup comes first: a saved result or intent never depends on the current scan.
 local function start_forward(req)
   local id = req.id
-  local saved = hub('hub.store.op', {key = id})
+  local saved = store.op(id)
   if saved.found then
     if not fingerprint_matches(saved.fingerprint, req) then fail('operation_conflict', 'This key has different content') end
     if type(saved.result) == 'table' and saved.result.error then fail(saved.result.error.code, saved.result.error.message) end
@@ -990,7 +977,7 @@ local function arm_refresh(delay)
   refresh_timer = rex.after(delay, function() refresh_timer = nil; app.refresh() end)
 end
 local function render_panel()
-  local ok, rows = pcall(reconcile)
+  local ok, rows = pcall(reconcile, true)
   local nodes = {}
   if not ok then
     nodes[#nodes + 1] = {id = 'error', type = 'widget', text = 'Could not read the tunnels: ' .. message(rows)}
@@ -1118,8 +1105,8 @@ local function perform(args)
 end
 
 -- The panel and the two forms are raw SDK views: they keep their own trees and actions. Tunnels
--- keeps its own operation records in hub.store, so the SDK saves no reply and opens no SQL
--- transaction (store = false, tx = false).
+-- keeps its own operation records (the ops table), so the SDK saves no reply. Each write is its own
+-- transaction (update), so a handler holds no transaction while it waits for Rex (store = false, tx = false).
 local raw = {tx = false, store = false}
 for _, route in ipairs({'/panels/tunnels', '/forms/forward', '/forms/release*'}) do
   app.view(route, {render = function(_, args) return render(args) end, ['view.action'] = function(_, args) return perform(args) end}, raw)
@@ -1184,5 +1171,6 @@ app.command({id = 'forward_port', title = 'Forward Port…', description = 'Shar
 for _, event in ipairs({'terminal.child_exited', 'block_closed', 'session_closed'}) do
   app.on(event, function() app.refresh(); kick() end, {tx = false})
 end
--- Work left by an earlier instance (a pending cleanup, a forward whose session closed) goes on now.
-kick()
+-- Work left by an earlier instance (a pending cleanup, a forward whose session closed) goes on after
+-- the migrations.
+app.start(kick, {tx = false})
