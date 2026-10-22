@@ -63,6 +63,7 @@ return function(plugin_dir, base, opts)
   end
   local stub = {
     args = {hub_client_id = 'hub', instance_id = 'instance', plugin_session = 'plugin'},
+    json = rex.json, -- the SDK measures each request with rex.json.encode
     on = function(name, fn) s.handlers[name] = fn end,
     after = function(_, fn) s.timers[#s.timers + 1] = fn end, -- A timer runs only on s:tick().
     exec = function(argv)
@@ -112,6 +113,15 @@ return function(plugin_dir, base, opts)
     end,
   }
   local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end}, {__index = os})}, {__index = base})
+  -- The LazyRex SDK, loaded fresh with the stub rex (its state is per plugin): sdk/lua of the LazyRex
+  -- checkout that runs the tests (H.args.sdk, else beside H.args.lib = <checkout>/lab/test).
+  local args = base.H and base.H.args or {}
+  local checkout = type(args.lib) == 'string' and args.lib:match('^(.*)/lab/test/?$')
+  local sdk_dir = assert(args.sdk or (checkout and checkout .. '/sdk/lua'), 'The LazyRex SDK directory is unknown')
+  local sdk_chunk = assert(loadfile(sdk_dir .. '/lazyrex.lua'))
+  setfenv(sdk_chunk, env)
+  local sdk = sdk_chunk()
+  env.require = function(name) if name == 'lazyrex' then return sdk end return base.require(name) end
   local chunk = assert(loadfile(plugin_dir .. '/tunnels.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)

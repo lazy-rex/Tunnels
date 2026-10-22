@@ -53,7 +53,9 @@ test('accept_risk must be the boolean true: nothing changes and nothing is saved
     args.accept_risk = value
     local reply = agent_release(s, args)
     expect(reply.error.code, tostring(value)).to_be('invalid_input')
-    expect(reply.error.message).to_match('The old stop command may still run')
+    -- false reaches the plugin, which names the risk. Another type is refused by the SDK argument
+    -- check (the schema says boolean), as the hub keymap check refused it on a direct call before.
+    expect(reply.error.message).to_match(value == false and 'The old stop command may still run' or 'accept_risk must be boolean')
     expect(record(s).key).to_be('A')
     expect(s.rev, 'no write').to_be(1)
     expect(next(s.ops), 'no operation result').to_be(nil)

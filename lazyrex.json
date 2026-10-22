@@ -1,6 +1,7 @@
 {
  "name": "tunnels",
  "main": "tunnels.lua",
+ "sdk": "0",
  "events": "all",
  "test": {
   "agents": [

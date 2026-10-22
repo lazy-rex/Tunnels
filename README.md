@@ -10,6 +10,11 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 {"name": "tunnels", "path": "/path/to/Tunnels/tunnels.lua"}
 ```
 
+Tunnels uses the LazyRex Plugin SDK (`lazyrex.json` `"sdk": "0"`; LazyRex `docs/plugin-sdk.md`). The hub
+starts it through the SDK launcher, so it needs a hub with that launcher. The SDK does the
+registration, the dispatch of agent and view calls, the caller checks and the error replies.
+Tunnels keeps its own state and operation records in hub.store (`tx = false`, `store = false`).
+
 The plugin loads its other files from its own directory, so keep them together.
 
 ## Agent actions
@@ -106,7 +111,8 @@ lazyrex-hub test
 
 - `tests/*.lua`: the tests. Each file that forwards a port first runs `tests/lib/guard.lua`, which
   fails the file unless the lab forces the stand-in binary and private paths.
-- `tests/lib/`: shared helpers (not test files).
+- `tests/lib/`: shared helpers (not test files). `tests/lib/sandbox.lua` loads the SDK from `sdk/lua` of the
+  LazyRex checkout that runs the tests.
 - `tests/parity_fixture.lua`: opens the Release Reservation form, which only a panel row opens, for
   the parity sweep (`lazyrex.json` `parity_routes`).
 - `tests/fake-opentunnel.sh`: the stand-in for the opentunnel CLI.

@@ -18,10 +18,11 @@
 -- plugin session, so the attempt outlives a plugin restart and Rex shows whether it still runs.
 -- The cleanup record owns the profile until Rex shows an exit code of 0: Forward refuses the port
 -- while the record exists, because a running `down` would also stop a new `serve` of the profile.
-local hub_id = assert(rex.args.hub_client_id, 'hub_client_id is required')
-local instance_id = assert(rex.args.instance_id, 'instance_id is required')
-local plugin_session = assert(rex.args.plugin_session or rex.session_id, 'plugin_session is required')
-local function fail(code, message) error({code = code, message = message}) end
+-- The LazyRex Plugin SDK does the registration, the dispatch, the caller checks and the error
+-- replies. The hub starts Tunnels through the SDK launcher (lazyrex.json "sdk"), so require works.
+local app = require('lazyrex').plugin('tunnels')
+local plugin_session = assert(app.session_id, 'plugin_session is required')
+local fail = app.fail
 local plugin_dir = assert(debug.getinfo(1, 'S').source:match('^@?(/.*)/[^/]*$'), 'The plugin path is unknown')
 -- Lab only: another profile prefix keeps lab tunnels apart from real ones. XDG directories cannot
 -- isolate a lab: the launchd service that `opentunnel up` registers gets no XDG variables (0.5.2).
@@ -65,34 +66,9 @@ local function find_opentunnel()
   return nil, 'opentunnel is not installed. Install it with: brew install anomalyco/tap/opentunnel'
 end
 
--- text_error raises a Rex or hub error that Rex Lua gave as text. Observed on Rex
--- 0.0.1792158932-g88fd41 (lab): the text ends with "(status=<n> code=<code>)". Keep the code: a
--- refusal is final. Only an error with no code, or with unavailable, disconnected or timeout (a lost
--- or timed-out call), is unavailable, so the caller retries it.
-local function text_error(err, default)
-  local text = tostring(err or default)
-  local code = text:match('code=([%w_]+)%)$')
-  if not code or code == 'unavailable' or code == 'disconnected' or code == 'timeout' then fail('unavailable', text) end
-  fail(code, text:match('failed: (.-) %(status=%d+ code=[%w_]+%)$') or text)
-end
-
-local function hub(action, args)
-  local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
-  if type(response) ~= 'table' then
-    if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Hub request failed') end
-    text_error(err, 'Hub request failed')
-  end
-  if type(response.result) ~= 'table' then fail('internal', 'Invalid hub result') end
-  return response.result
-end
-local function rex_ok(method, args)
-  local result, err = rex.call(method, args)
-  if not result then
-    if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Rex request failed') end
-    text_error(err, 'Rex request failed')
-  end
-  return result
-end
+-- A hub or Rex error keeps its code: a refusal is final. Only a lost or timed-out call is
+-- unavailable, so the caller retries it (the SDK, app.hub and app.rex).
+local hub, rex_ok = app.hub, app.rex
 local function invalidate() pcall(hub, 'hub.ui.invalidate', {}) end
 local function message(err) return type(err) == 'table' and (err.message or err.code) or tostring(err) end
 
@@ -1140,12 +1116,13 @@ local function perform(args)
   fail('invalid_input', 'Unknown Tunnels action')
 end
 
-local handlers = {
-  ['view.render'] = function(args) return {tree = render(args)} end,
-  ['view.action'] = perform,
-  ['view.seen'] = function() return {} end,
-  ['hub.changed'] = function() return {} end,
-}
+-- The panel and the two forms are raw SDK views: they keep their own trees and actions. Tunnels
+-- keeps its own operation records in hub.store, so the SDK saves no reply and opens no SQL
+-- transaction (store = false, tx = false).
+local raw = {tx = false, store = false}
+for _, route in ipairs({'/panels/tunnels', '/forms/forward', '/forms/release*'}) do
+  app.view(route, {render = function(_, args) return render(args) end, ['view.action'] = function(_, args) return perform(args) end}, raw)
+end
 -- Agent actions (agent parity). The hub forwards them with the agent's pid; hub.identify names
 -- the agent and its pane. Agents may forward and stop any port (decisions
 -- "Agents may act on anything" and "Agents use the Tunnels plugin fully").
@@ -1183,64 +1160,28 @@ local agent_actions = {
     description = 'Scan the listening TCP ports of processes in Rex panes, with the given session (default: yours) first. It refreshes the scan that the Forward Port form shows and changes nothing else, so it takes no key. Empty lists can appear as {}.',
     args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
 }
-local exports = {}
-for _, a in ipairs(agent_actions) do exports[#exports + 1] = a.name end
-local function exported(name) for _, e in ipairs(exports) do if e == name then return true end end return false end
-local function identify(principal)
-  if type(principal) ~= 'table' or principal.kind ~= 'peer' or type(principal.pid) ~= 'number' then fail('refused', 'A local requester PID is required') end
-  local r = hub('hub.identify', {pid = principal.pid})
-  if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
-  return {kind = 'agent', agent = r.agent}, r.session_id, r.block_id
-end
-local function agent_call(name, principal, args)
-  local caller, session_id, block_id = identify(principal)
-  if type(args) ~= 'table' then fail('invalid_input', 'Arguments must be an object') end
+-- agent_call runs agent action name for the agent of ctx. The SDK checked the arguments against the
+-- schema, and it gives the key as ctx.key; the handlers read it as args.key.
+local function agent_call(name, ctx, args)
+  local caller = {kind = 'agent', agent = ctx.agent}
+  args.key = ctx.key
   if name == 'tunnels.list' then return list_tunnels() end
-  if name == 'tunnels.forward' then return agent_forward(caller, session_id, block_id, args) end
+  if name == 'tunnels.forward' then return agent_forward(caller, ctx.session_id, ctx.block_id, args) end
   if name == 'tunnels.stop' then return stop_forward(caller, args.forward, args.key) end
   if name == 'tunnels.release' then return release_reservation(caller, args.profile, args.attempt, args.accept_risk, args.key) end
-  if name == 'tunnels.ports' then return ports_for(session_id, args) end
+  if name == 'tunnels.ports' then return ports_for(ctx.session_id, args) end
   fail('not_supported', 'Unknown Tunnels action')
 end
-local actions = {}
-for name in pairs(handlers) do actions[#actions + 1] = {name = name, kind = 'client', title = name,
-  args = {type = 'object', additionalProperties = true}} end
-for _, a in ipairs(agent_actions) do actions[#actions + 1] = a end
--- Only the hub can assert the original caller of a forwarded agent action.
-actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward an agent action',
-  args = {type = 'object', properties = {action = {type = 'string'}, args = {type = 'object'}, requester_pid = {type = 'integer'}},
-    required = {'action', 'args', 'requester_pid'}, additionalProperties = false}}
-rex.call('client.keymap', {actions = actions})
-hub('hub.register', {plugin = 'tunnels', instance_id = instance_id, exports = exports, commands = {
-  {id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true, user_only = 'navigation'},
-  {id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward',
-    action = 'tunnels.forward'},
-}})
+for _, a in ipairs(agent_actions) do
+  local name = a.name
+  app.action(name, a.args, function(ctx, args) return agent_call(name, ctx, args) end, {title = a.title, description = a.description, tx = false, store = false})
+end
+app.command({id = 'tunnels', title = 'Tunnels', description = 'Show forwarded ports', keywords = {'tunnel', 'port', 'opentunnel'}, route = '/panels/tunnels', surface = 'panel', landing = true, user_only = 'navigation'})
+app.command({id = 'forward_port', title = 'Forward Port…', description = 'Share a local port with a public URL', keywords = {'tunnel', 'port', 'share', 'opentunnel'}, route = '/forms/forward',
+  action = 'tunnels.forward'})
 -- A tunnel block that exits or closes, or a closed session, changes the panel.
-rex.on('terminal.child_exited', function() invalidate(); kick() end)
-rex.on('block_closed', function() invalidate(); kick() end)
-rex.on('session_closed', function() invalidate(); kick() end)
-rex.on('client_perform_requested', function(ctx, ev)
-  local ok, result = pcall(function()
-    local from_hub = ev.requester and ev.requester.client_id == hub_id
-    if ev.action == 'hub.forward' then
-      if not from_hub then fail('refused', 'Only the hub forwards agent actions') end
-      local f = ev.args or {}
-      if not exported(f.action) then fail('refused', 'The forwarded action is not exported') end
-      if type(f.requester_pid) ~= 'number' or f.requester_pid <= 0 or f.requester_pid % 1 ~= 0 then fail('invalid_input', 'A positive requester PID is required') end
-      return agent_call(f.action, {kind = 'peer', pid = f.requester_pid}, f.args or {})
-    end
-    if exported(ev.action) then return agent_call(ev.action, ev.requester and ev.requester.principal, ev.args or {}) end
-    local handler = handlers[ev.action]
-    if not handler then fail('not_supported', 'Unknown Tunnels action') end
-    if not from_hub then fail('refused', 'Only the hub calls Tunnels view actions') end
-    local args = ev.args or {}
-    if ev.action ~= 'hub.changed' and args.user ~= 'user' then fail('refused', 'Unknown user') end
-    return handler(args)
-  end)
-  if ok then rex.call('client.reply', {call_id = ev.call_id, result = result})
-  else rex.call('client.reply', {call_id = ev.call_id, error = type(result) == 'table' and result or {code = 'internal', message = tostring(result)}}) end
-end)
-rex.call('client.set_label', {label = 'lazyrex-plugin:tunnels'})
+for _, event in ipairs({'terminal.child_exited', 'block_closed', 'session_closed'}) do
+  app.on(event, function() invalidate(); kick() end, {tx = false})
+end
 -- Work left by an earlier instance (a pending cleanup, a forward whose session closed) goes on now.
 kick()
