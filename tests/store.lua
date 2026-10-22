@@ -52,6 +52,20 @@ test('update with a saved op key: the same fingerprint answers op_exists, anothe
   expect(#f.committed, 'no write').to_be(0)
 end)
 
+test('update refuses a catalog field that the schema does not have, and a kind that is not a table; nothing is written (fixture)', function()
+  for name, change in pairs({
+    extra = function(s) s.forwards.b1.port = 2; s.extra = {x = 1} end,
+    kind = function(s) s.forwards.b1.port = 2; s.stops = 'none' end,
+    fence = function(s) s.forwards.b1.port = 2; s.fence = 5 end,
+  }) do
+    local store, f = fixture({forwards = {b1 = fw(1)}}, {})
+    local ok, err = pcall(store.update, change)
+    expect(ok, name).to_be(false)
+    expect(err.code, name).to_be('internal')
+    expect(#f.committed, name .. ': no write').to_be(0)
+  end
+end)
+
 -- Lab: the real SQL. Each kind with optional fields missing, nested creator and result, and the fence.
 local alice = agent('alice')
 local S = session('tunnels-store')

@@ -19,8 +19,10 @@ M.KINDS = {
   {field = 'cleanups', key = 'profile', columns = {'phase', 'key', 'block_id', 'result', 'retry_at', 'saved_at', 'attempt', 'fence_v'}, json = {result = true}},
 }
 local INTEGER = {port = true, saved_at = true, retry_at = true, fence_v = true}
+M.FIELD = {} -- the catalog fields of the kinds
 for _, k in ipairs(M.KINDS) do
   k.json = k.json or {}
+  M.FIELD[k.field] = true
   k.known = {}
   for _, c in ipairs(k.columns) do k.known[c] = true end
 end
@@ -120,8 +122,19 @@ function M.open(app)
     db.exec('INSERT OR REPLACE INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', unpack(values, 1, #names))
   end
   -- write saves the difference between catalog before and catalog after, and answers the count of
-  -- changed rows.
+  -- changed rows. It checks the shape of after first: the four kinds are tables, the fence is nil or
+  -- text, and no other field is there. So a field that the schema does not have fails, and nothing
+  -- is written.
   local function write(before, after)
+    for field, v in pairs(after) do
+      if field == 'fence' then
+        if type(v) ~= 'string' then fail('internal', 'The fence is not a string') end
+      elseif not M.FIELD[field] then fail('internal', 'The catalog has the field ' .. tostring(field) .. ', which the schema does not have')
+      elseif type(v) ~= 'table' then fail('internal', 'The catalog field ' .. field .. ' is not a table') end
+    end
+    for _, k in ipairs(M.KINDS) do
+      if after[k.field] == nil then fail('internal', 'The catalog has no ' .. k.field) end
+    end
     local n = 0
     for _, k in ipairs(M.KINDS) do
       local old, new = before[k.field], after[k.field]
@@ -134,7 +147,6 @@ function M.open(app)
     end
     if after.fence ~= before.fence then
       if after.fence == nil then db.exec("DELETE FROM meta WHERE name = 'fence'")
-      elseif type(after.fence) ~= 'string' then fail('internal', 'The fence is not a string')
       else db.exec("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', ?1)", after.fence) end
       n = n + 1
     end
