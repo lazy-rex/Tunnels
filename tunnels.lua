@@ -722,20 +722,13 @@ local function release_reservation(caller, profile, attempt, accept_risk, key)
   kick()
   return result
 end
--- The release form gets the profile and the attempt in its route, as percent-encoded query values.
-local function query_value(v) return (tostring(v):gsub('[^%w%-%._~]', function(c) return string.format('%%%02X', c:byte()) end)) end
-local function release_route(profile, attempt) return '/forms/release?profile=' .. query_value(profile) .. '&attempt=' .. query_value(attempt) end
--- release_target answers the profile and the attempt of a release form route, or nil.
-local function release_target(route)
-  local p, a = tostring(route or ''):match('^/forms/release%?profile=([^&]*)&attempt=([^&]*)$')
-  local function decode(v)
-    -- A malformed escape must not select another profile or attempt.
-    local rest = v:gsub('%%%x%x', '')
-    if rest:find('%', 1, true) or v == '' then return nil end
-    return (v:gsub('%%(%x%x)', function(hex) return string.char(tonumber(hex, 16)) end))
-  end
-  p, a = p and decode(p), a and decode(a)
-  if p and a then return p, a end
+-- The release form gets the profile and the attempt in its route query (app.route).
+local function release_route(profile, attempt) return app.route('/forms/release', {profile = profile, attempt = attempt}) end
+-- release_target answers the profile and the attempt of the decoded route query (ctx.query), or nil.
+-- The SDK drops a pair with a malformed escape, so it cannot select another profile or attempt.
+local function release_target(query)
+  local p, a = query.profile, query.attempt
+  if p and p ~= '' and a and a ~= '' then return p, a end
 end
 
 -- enc writes every byte outside [A-Za-z0-9-] as '_' and two hex digits, so an agent ID and key fit
@@ -952,8 +945,8 @@ end
 
 -- render_release answers the confirmation form of a legacy sending record. It names the profile and
 -- the attempt from its route and shows the warning; the checkbox is required.
-local function render_release(args)
-  local profile, attempt = release_target(args.route)
+local function render_release(query)
+  local profile, attempt = release_target(query)
   local nodes = {}
   local state = profile and catalog()
   if not profile then
@@ -973,10 +966,10 @@ local function render_release(args)
   return {title = 'Release Reservation', nodes = nodes}
 end
 -- release_form is the form submit (view path). The checkbox is checked before anything else.
-local function release_form(args)
+local function release_form(args, query)
   local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
   if values.accept ~= true then fail('invalid_input', 'Check "I accept this risk" to release the reservation. ' .. release_warning) end
-  local profile, attempt = release_target(args.route)
+  local profile, attempt = release_target(query)
   if not profile then fail('invalid_input', 'This form names no reservation') end
   local result = release_reservation('user', profile, attempt, true, args.operation_key)
   return {released = result.released, profile = result.profile, attempt = result.attempt, close_form = true}
@@ -1089,13 +1082,13 @@ local function ports_for(session_id, args)
   return {session_id = session_id, ports = ports, warnings = result.warnings or {}}
 end
 
-local function render(args)
+local function render(args, ctx)
   if args.route == '/panels/tunnels' then return render_panel() end
   if args.route == '/forms/forward' then return render_form(args) end
-  if args.route == '/forms/release' or tostring(args.route):sub(1, 15) == '/forms/release?' then return render_release(args) end
+  if args.route == '/forms/release' or tostring(args.route):sub(1, 15) == '/forms/release?' then return render_release(ctx.query) end
   fail('not_found', 'Unknown route')
 end
-local function perform(args)
+local function perform(args, ctx)
   if args.route == '/forms/forward' and args.node_id == 'forward' and args.action == 'forward' then return forward(args) end
   if args.route == '/forms/forward' and args.node_id == 'rescan' then
     local ctx = type(args.context) == 'table' and args.context or {}
@@ -1103,7 +1096,7 @@ local function perform(args)
     app.refresh()
     return {}
   end
-  if tostring(args.route):sub(1, 15) == '/forms/release?' and args.node_id == 'release' and args.action == 'release' then return release_form(args) end
+  if tostring(args.route):sub(1, 15) == '/forms/release?' and args.node_id == 'release' and args.action == 'release' then return release_form(args, ctx.query) end
   if args.route == '/panels/tunnels' and args.node_id == 'new' then return {form = '/forms/forward'} end
   local cleanup = args.route == '/panels/tunnels' and type(args.node_id) == 'string' and args.node_id:match('^cleanup/(.+)$')
   if cleanup and args.action == 'release' then
@@ -1120,7 +1113,7 @@ end
 -- transaction (store = false, tx = false).
 local raw = {tx = false, store = false}
 for _, route in ipairs({'/panels/tunnels', '/forms/forward', '/forms/release*'}) do
-  app.view(route, {render = function(_, args) return render(args) end, ['view.action'] = function(_, args) return perform(args) end}, raw)
+  app.view(route, {render = function(ctx, args) return render(args, ctx) end, ['view.action'] = function(ctx, args) return perform(args, ctx) end}, raw)
 end
 -- Agent actions (agent parity). The hub forwards them with the agent's pid; hub.identify names
 -- the agent and its pane. Agents may forward and stop any port (decisions
