@@ -183,12 +183,15 @@ function M.open(app)
   -- The migration (the empty tables) commits before, in its own transaction. So a failed import leaves
   -- the empty schema and no mark: the plugin does not start, hub.store keeps the state, and the next
   -- start imports again. A field that the schema does not have, or a kind that is not a table, fails
-  -- the import. Two kinds are not imported:
+  -- the import. Three kinds are not imported:
   -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
   --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
   --   prints one line for each.
   -- - A cleanup in phase "sending" with no fence_v (an attempt of a plugin without the fence): it
   --   fails the import, because nothing proves that its old script can never run down.
+  -- - An intent whose fingerprint has the v1 Forward format: it fails the import. The intent is an
+  --   active reservation, not a saved result, so coord-tunnels-v1-op does not apply. Maintenance
+  --   could adopt it and save a new v1 result that a retry can never match.
   -- writes stays 0, so the release can tell that no write came after the import.
   local function import()
     local mark = db.first("SELECT value FROM meta WHERE name = 'import'")
@@ -205,6 +208,11 @@ function M.open(app)
       local list = value[k.field]
       if list ~= nil and type(list) ~= 'table' then fail('internal', 'The hub.store record has ' .. k.field .. ' that is not a table') end
       for key, x in pairs(list or {}) do state[k.field][key] = x end
+    end
+    for id, i in pairs(state.intents) do
+      if type(i) == 'table' and type(i.fingerprint) == 'string' and i.fingerprint:sub(1, 8) == 'forward/' then
+        fail('conflict', 'The import refuses the intent ' .. tostring(id) .. ': its fingerprint has the v1 Forward format')
+      end
     end
     for profile, c in pairs(state.cleanups) do
       if type(c) == 'table' and c.phase == 'sending' and c.fence_v == nil then

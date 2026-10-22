@@ -90,6 +90,17 @@ test('the import refuses a sending cleanup with no fence, and an unknown field; 
   expect(f.error and f.error.code).to_be('internal')
 end)
 
+test('the import refuses an intent with a v1 Forward fingerprint; it writes nothing (fixture)', function()
+  -- Maintenance could adopt the intent and save a new v1 result that a retry can never match. The
+  -- dropped v1 operations (coord-tunnels-v1-op) are saved results; an intent is an active reservation.
+  local intent = {session_id = 's', port = 4322, target = '127.0.0.1:4322', profile = 'lazyrex-4322', creator = {kind = 'user'},
+    fingerprint = 'forward/5:other/4:4322/session:x', created = 'c', saved_at = 5, phase = 'sending'}
+  local f = fixture({intents = {i1 = intent}}, {})
+  expect(f.error and f.error.code).to_be('conflict')
+  expect(f.error.message).to_match('i1')
+  expect(#f.execs, 'nothing is written').to_be(0)
+end)
+
 test('a mark other than done, a record that is not a table, or a kind that is not a table fails the import; nothing is written (fixture)', function()
   local f = fixture({forwards = {}}, {}, {mark = 'running'})
   expect(f.error and f.error.code, 'a mark other than done').to_be('internal')
