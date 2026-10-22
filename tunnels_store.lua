@@ -177,6 +177,51 @@ function M.open(app)
     end)
   end
 
+  -- The import (decision "One storage system"): at the first start on SQL, one transaction copies the
+  -- hub.store record "forwards" and every saved operation (hub.store.ops_scan) into the tables, and
+  -- sets meta import = 'done'. A later start imports nothing. A field that the schema does not have
+  -- fails the import, and nothing is written: the plugin does not start, and hub.store keeps the
+  -- state. Two kinds are not imported:
+  -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
+  --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
+  --   prints one line for each.
+  -- - A cleanup in phase "sending" with no fence_v (an attempt of a plugin without the fence): it
+  --   fails the import, because nothing proves that its old script can never run down.
+  -- writes stays 0, so the release can tell that no write came after the import.
+  local function import()
+    if db.first("SELECT value FROM meta WHERE name = 'import'") then return end
+    local record = app.hub('hub.store.get', {keys = {'forwards'}}).records.forwards
+    local value = type(record) == 'table' and record.value or {}
+    local state = {intents = {}, forwards = {}, cleanups = {}, stops = {}}
+    for _, k in ipairs(M.KINDS) do
+      for key, x in pairs(value[k.field] or {}) do state[k.field][key] = x end
+    end
+    for profile, c in pairs(state.cleanups) do
+      if type(c) == 'table' and c.phase == 'sending' and c.fence_v == nil then
+        fail('conflict', 'The import refuses the cleanup of ' .. tostring(profile) .. ': it is sending with no fence')
+      end
+    end
+    for field in pairs(value) do
+      if not state[field] and field ~= 'fence' then fail('internal', 'The import has no table for the field ' .. tostring(field)) end
+    end
+    if value.fence ~= nil then state.fence = value.fence end
+    write({intents = {}, forwards = {}, cleanups = {}, stops = {}}, state)
+    local after = nil
+    repeat
+      local page = app.hub('hub.store.ops_scan', {after = after, limit = 500})
+      for _, op in ipairs(page.ops or {}) do
+        if type(op.fingerprint) == 'string' and op.fingerprint:sub(1, 8) == 'forward/' then
+          print('tunnels: the import drops the operation ' .. op.key .. ': its fingerprint has the v1 Forward format (coord-tunnels-v1-op)')
+        else
+          db.exec('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', op.key, op.fingerprint, json.encode(op.result))
+        end
+      end
+      after = page.next
+    until after == nil
+    db.exec("INSERT INTO meta (name, value) VALUES ('import', 'done')")
+  end
+  app.start(import)
+
   return S
 end
 
