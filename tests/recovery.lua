@@ -98,10 +98,10 @@ test('two labeled blocks are no proof', function()
   T.no_cleanup_for(p)
 end)
 
-test('a cleanup with an unknown create result keeps its port across a restart and starts no down', function()
+test('a cleanup with an unknown create result and an unreadable claim keeps its port across a restart and starts no down', function()
   local p = T.port()
   local profile = T.prefix .. p
-  save(function(v) v.cleanups[profile] = {phase = 'sending', key = 'unknown-down', saved_at = os.time()} end)
+  save(function(v) v.cleanups[profile] = T.hold('unknown-down', os.time()) end)
   T.open_panel(pane) -- a render kicks maintenance
   rex.sleep(2)
   local op = T.submit(T.open_form(pane), p)
@@ -147,7 +147,7 @@ test('an exited block with the label of a cleanup attempt is no proof: the profi
   local key = 'unrelated-' .. p
   local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/usr/bin/true'})
   wait('the unrelated block exited', function() local r = process_of(P, b); return r and not r.child and r.last_exit end, 10)
-  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  save(function(v) v.cleanups[profile] = T.hold(key, os.time() - 1) end)
   T.open_panel(pane) -- a render kicks maintenance; it runs every second while a cleanup exists
   rex.sleep(4)
   local c = T.catalog().cleanups[profile]
@@ -169,7 +169,7 @@ test('a cleanup attempt whose running write was lost is proven and finished, aft
   local profile = T.prefix .. p
   local P = plugin_session()
   local key = 'lost-running-' .. p
-  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  save(function(v) v.cleanups[profile] = T.hold(key, os.time() - 1) end)
   -- The block of the attempt, as session.new_block made it before its reply was lost.
   local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
   wait('down ran', function() return T.down_calls(p) == 1 end, 10)
@@ -186,7 +186,7 @@ test('a completed attempt that is still sending at a plugin restart is proven an
   local P = plugin_session()
   local key = 'restart-sending-' .. p
   H.hub('hub.admin.stop', {plugin = 'tunnels'})
-  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1} end)
+  save(function(v) v.cleanups[profile] = T.hold(key, os.time() - 1) end)
   local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
   wait('down ran', function() return T.down_calls(p) == 1 end, 10)
   expect(T.catalog().cleanups[profile].phase).to_be('sending')

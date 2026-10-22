@@ -217,7 +217,7 @@ end
 -- directory <fence>/<key>, made with mkdir before the record is saved, so an existing attempt
 -- state is never reused. Its record keeps the absolute path (attempt) and fence_v = 1. The script
 -- and the plugin both try to claim <attempt>/claim (a symlink to "script" or "plugin"): exactly
--- one claim succeeds. A record without fence_v comes from an older plugin and is never claimed.
+-- one claim succeeds. A sending record is always fenced: the cleanups table refuses one without.
 -- Nothing deletes fence state.
 local function run(argv) local r = rex.exec(argv, {timeout = 5}); return r and r.ok == true, r end
 -- random_hex answers n random bytes as hex, or nil.
@@ -355,7 +355,6 @@ local function advance_cleanups()
   local by_id = blocks_of(plugin_session, sessions())
   local now = os.time()
   for profile, c in pairs(state.cleanups) do
-    if type(c) ~= 'table' then c = {phase = 'new'} end
     if c.phase == 'running' then
       local block = by_id and by_id[c.block_id]
       if by_id and not block then
@@ -419,7 +418,7 @@ local function advance_cleanups()
     elseif c.phase == 'sending' then
       local block = by_id and proven(by_id, down_prefix .. c.key, c.key, c.saved_at, plugin_session, 'tunnels-down.sh')
       if block then set_cleanup(profile, function(x) x.phase, x.block_id = 'running', block.block_id end)
-      elseif c.fence_v == 1 and type(c.attempt) == 'string' then
+      else
         -- No proof. The claim decides: a plugin claim means that this attempt can never run down.
         -- A missing plugin session is no proof of either kind, so the claim and the process checks
         -- apply when the session is not listed too.
@@ -445,10 +444,6 @@ local function advance_cleanups()
           else cleanup_errors[profile] = busy end
         else cleanup_errors[profile] = why end
       end
-      -- Otherwise the create result stays unknown: the profile stays owned. That holds for a legacy
-      -- record (no fence_v) also when the plugin session is not listed: a missing session does not
-      -- prove that an earlier accepted create cannot start the old script, which has no fence. The
-      -- import refuses such a record (tunnels_store.lua), so the SQL tables never hold one.
     elseif c.phase == 'new' or (c.phase == 'retry' and now >= (c.retry_at or 0)) then
       -- No new attempt while the plugin session is not listed: its create would fail, and each try
       -- would leave one more attempt directory.
@@ -948,10 +943,7 @@ local function list_tunnels()
   end
   local cleanups, records = {}, catalog().cleanups
   for profile, c in pairs(records) do
-    c = type(c) == 'table' and c or {}
-    -- legacy: an attempt of an older plugin (no fence).
-    cleanups[#cleanups + 1] = {profile = profile, error = cleanup_errors[profile], phase = c.phase, key = c.key,
-      legacy = c.key ~= nil and c.fence_v == nil}
+    cleanups[#cleanups + 1] = {profile = profile, error = cleanup_errors[profile], phase = c.phase, key = c.key}
   end
   table.sort(cleanups, function(a, b) return a.profile < b.profile end)
   return {forwards = forwards, pending = pending, cleanups = cleanups}
@@ -1004,7 +996,7 @@ end
 -- "Agents may act on anything" and "Agents use the Tunnels plugin fully").
 local agent_actions = {
   {name = 'tunnels.list', kind = 'client', title = 'List forwarded ports',
-    description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups: profile, phase, key, error; legacy = an attempt of an older plugin version). Empty lists can appear as {}.',
+    description = 'List the forwarded ports with their state, public URL, session and creator, the forwards whose start result is unknown (pending), and the opentunnel services that are still stopping (cleanups: profile, phase, key, error). Empty lists can appear as {}.',
     args = {type = 'object', properties = {}, additionalProperties = false}},
   {name = 'tunnels.forward', kind = 'client', title = 'Forward a port to a public URL',
     description = 'Forward a local TCP port to a public opentunnel URL. The port becomes public: anyone with the URL can reach it, and the tunnel does not ask visitors to sign in. '

@@ -25,7 +25,7 @@ The hub gives agents these actions (MCP tools):
 
 - `tunnels.list`: the forwards (state, URL, session, creator, logs shown), the forwards with an
   unknown start result (`pending`), and the opentunnel services that are still stopping (`cleanups`:
-  profile, phase, key, error and `legacy`).
+  profile, phase, key and error).
 - `tunnels.forward {key, source}` or `tunnels.forward {key, port, session_id?, block_id?}`: the
   form's Forward. The port becomes public: anyone with the URL can reach it, and the tunnel does not
   ask visitors to sign in. `source` is the `source` of a listener from `tunnels.ports` (its session,

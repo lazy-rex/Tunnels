@@ -7,6 +7,11 @@ return function(E, tests_dir)
   T.fixture = T.plugin_dir .. '/tests/fake-opentunnel.sh'
   T.fake = os.getenv('FAKE_OT_DIR')
   T.prefix = 'lazyrexlab-'
+  -- hold answers a fenced sending cleanup that keeps its profile and never moves on: its attempt
+  -- directory does not exist, so the claim is unreadable (fail closed; tunnels.lua, claim_attempt).
+  function T.hold(key, saved_at)
+    return {phase = 'sending', key = key, saved_at = saved_at, fence_v = 1, attempt = '/nonexistent/lazyrexlab-attempt/' .. key}
+  end
   math.randomseed(os.time())
   local next_port = 44000 + math.random(0, 600) * 20
   function T.port() next_port = next_port + 1; return next_port end

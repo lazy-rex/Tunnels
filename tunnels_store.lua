@@ -11,12 +11,16 @@
 local M = {}
 
 -- KINDS: the catalog field (also the table name), its key column and its columns. json columns hold
--- a Lua table as JSON text; the other columns hold a string or a number.
+-- a Lua table as JSON text; the other columns hold a string or a number. check: a row rule that SQL
+-- enforces for every writer.
 M.KINDS = {
   {field = 'intents', key = 'id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'creator', 'fingerprint', 'created', 'saved_at', 'phase'}, json = {creator = true}},
   {field = 'forwards', key = 'block_id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'op', 'created', 'creator', 'url'}, json = {creator = true}},
   {field = 'stops', key = 'id', columns = {'forward', 'session_id', 'port', 'profile', 'fingerprint', 'saved_at'}},
-  {field = 'cleanups', key = 'profile', columns = {'phase', 'key', 'block_id', 'result', 'retry_at', 'saved_at', 'attempt', 'fence_v'}, json = {result = true}},
+  -- A sending cleanup is always fenced (decision "Cleanup attempt fence"): its create result can be
+  -- unknown, and only the claim of its attempt proves that it can never run down.
+  {field = 'cleanups', key = 'profile', columns = {'phase', 'key', 'block_id', 'result', 'retry_at', 'saved_at', 'attempt', 'fence_v'}, json = {result = true},
+    check = "phase <> 'sending' OR (fence_v = 1 AND attempt IS NOT NULL)"},
 }
 local INTEGER = {port = true, saved_at = true, retry_at = true, fence_v = true}
 M.FIELD = {} -- the catalog fields of the kinds
@@ -32,6 +36,7 @@ do
   for _, k in ipairs(M.KINDS) do
     local cols = {k.key .. ' TEXT PRIMARY KEY'}
     for _, c in ipairs(k.columns) do cols[#cols + 1] = c .. (INTEGER[c] and ' INTEGER' or ' TEXT') end
+    if k.check then cols[#cols + 1] = 'CHECK (' .. k.check .. ')' end
     out[#out + 1] = 'CREATE TABLE ' .. k.field .. ' (' .. table.concat(cols, ', ') .. ')'
   end
   out[#out + 1] = 'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)'
@@ -188,7 +193,8 @@ function M.open(app)
   --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
   --   prints one line for each.
   -- - A cleanup in phase "sending" with no fence_v (an attempt of a plugin without the fence): it
-  --   fails the import, because nothing proves that its old script can never run down.
+  --   fails the import, because nothing proves that its old script can never run down. (The cleanups
+  --   table refuses such a row too; this check names the profile.)
   -- - An intent whose fingerprint has the v1 Forward format: it fails the import. The intent is an
   --   active reservation, not a saved result, so coord-tunnels-v1-op does not apply. Maintenance
   --   could adopt it and save a new v1 result that a retry can never match.

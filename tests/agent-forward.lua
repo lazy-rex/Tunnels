@@ -171,7 +171,7 @@ end)
 
 test('a saved stop or cleanup reserves its port on the tool path', function()
   local p = T.port()
-  save(function(v) v.cleanups[T.prefix .. p] = {phase = 'sending', key = 'held-' .. p, saved_at = os.time() + 3600} end)
+  save(function(v) v.cleanups[T.prefix .. p] = T.hold('held-' .. p, os.time() + 3600) end)
   expect_error(function() alice:call('tunnels.forward', {key = 'held-1', port = p, session_id = S}) end, 'still stopping')
   -- An injection holds the final batch of the saved stop, so maintenance cannot end it first.
   local held = inject{match = {sql_commit_writes = 'ops', sql_param = 'held-stop-' .. p}, fail = 'held', times = 'always'}

@@ -289,16 +289,6 @@ test('an unknown owner or a missing attempt directory keeps the profile (sandbox
   expect(fs[c.attempt .. '/claim']).to_be(nil)
 end)
 
-test('a record without fence_v is never claimed (sandbox)', function()
-  local fs = {}
-  local c = fenced(fs, 'ff')
-  c.fence_v = nil
-  local s = fence_sandbox(c, {fs = fs, fence = ROOT .. '/f1'})
-  s:tick()
-  expect(record(s).phase).to_be('sending')
-  for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/ln', 'no claim') end
-end)
-
 -- A plugin session that session.list does not show is no process or fence proof.
 local NO_SESSION = {['session.list'] = function() return {sessions = {}} end}
 
@@ -334,17 +324,6 @@ test('a missing plugin session: a plugin claim retries; a script exit 0 goes thr
   s.processes = {PLUGIN}
   s:tick()
   expect(record(s)).to_be(nil)
-end)
-
-test('a missing plugin session keeps a legacy sending record (sandbox)', function()
-  -- A missing session does not prove that an earlier accepted create cannot start the old script.
-  local s = fence_sandbox({phase = 'sending', key = 'gd', saved_at = os.time() - 1}, {rex = NO_SESSION})
-  s:tick()
-  s:tick()
-  expect(record(s).phase).to_be('sending')
-  expect(record(s).key, 'the same attempt').to_be('gd')
-  expect(#s.calls, 'no create').to_be(0)
-  for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/ln', 'no claim') end
 end)
 
 test('a missing plugin session starts no new attempt (sandbox)', function()

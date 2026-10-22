@@ -105,6 +105,20 @@ test('every kind, a missing optional field, nested JSON and the fence round-trip
   expect(got.forwards['rt-forward'].source_block).to_be(nil)
 end)
 
+test('the cleanups table refuses a sending row without fence_v = 1 and an attempt; a fenced one is accepted (lab)', function()
+  for name, row in pairs({
+    ['no fence'] = {"INSERT INTO cleanups (profile, phase, key) VALUES ('ck-1', 'sending', 'k')"},
+    ['no attempt'] = {"INSERT INTO cleanups (profile, phase, key, fence_v) VALUES ('ck-2', 'sending', 'k', 1)"},
+    ['fence 2'] = {"INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('ck-3', 'sending', 'k', 2, '/a')"},
+  }) do
+    expect_error(function() sql_write(row[1]) end, 'CHECK')
+    expect(sql("SELECT profile FROM cleanups WHERE profile LIKE 'ck-%'")[1], name .. ': no row').to_be(nil)
+  end
+  -- The plugin is idle (no state), and the row goes before the next maintenance pass can claim it.
+  sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('ck-4', 'sending', 'k', 1, '/nonexistent/k')")
+  sql_write("DELETE FROM cleanups WHERE profile = 'ck-4'")
+end)
+
 local function writes() return sql("SELECT value FROM meta WHERE name = 'writes'")[1].value end
 local function part(v) v = tostring(v); return #v .. ':' .. v .. '/' end
 test('an operation result and the write counter commit with the change, or not at all (lab)', function()
