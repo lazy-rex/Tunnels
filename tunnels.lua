@@ -972,10 +972,10 @@ local function render_release(args)
   end
   return {title = 'Release Reservation', nodes = nodes}
 end
--- release_form is the form submit (view path). The checkbox is checked before anything else.
+-- release_form is the form submit (view path). The risk field is checked before anything else.
 local function release_form(args)
   local values = type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
-  if values.accept ~= true then fail('invalid_input', 'Check "I accept this risk" to release the reservation. ' .. release_warning) end
+  if values.accept ~= true then fail('invalid_input', 'Choose Yes for "I accept this risk" to release the reservation. ' .. release_warning) end
   local profile, attempt = release_target(args.route)
   if not profile then fail('invalid_input', 'This form names no reservation') end
   local result = release_reservation('user', profile, attempt, true, args.operation_key)

@@ -82,7 +82,7 @@ The user or an agent can release it, with an explicit risk acceptance:
 
 - The panel row of the record has **Release reservation…**. It opens a form that names the profile
   and the attempt key and shows this warning: "The old stop command may still run. If it runs, it
-  stops the next forward of this profile." The checkbox "I accept this risk" is required.
+  stops the next forward of this profile." The field "I accept this risk" is required: choose Yes.
 - `tunnels.release {profile, attempt, accept_risk, key}` does the same for agents. `accept_risk` must
   be `true`. `attempt` is the `key` of a `tunnels.list` cleanup with `releasable = true`.
 

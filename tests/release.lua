@@ -72,13 +72,13 @@ test('accept_risk must be the boolean true: nothing changes and nothing is saved
   expect(agent_release(s, args).error.code).to_be('invalid_input')
 end)
 
-test('the form needs the checkbox: nothing changes without it (sandbox)', function()
+test('the form needs Yes for the risk field: nothing changes without it (sandbox)', function()
   local s = release_sandbox(legacy('A'))
   local route = open_form(s)
   for _, values in ipairs({{}, {accept = false}, {accept = 'true'}}) do
     local reply = submit(s, route, values, 'f1')
     expect(reply.error.code).to_be('invalid_input')
-    expect(reply.error.message).to_match('I accept this risk')
+    expect(reply.error.message).to_match('Choose Yes for "I accept this risk"')
   end
   expect(record(s).key).to_be('A')
   expect(s.rev, 'no write').to_be(1)
