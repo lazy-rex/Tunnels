@@ -143,6 +143,20 @@ test('a replay answers the first result after attempt B owns the profile; B stay
   expect(record(s).key).to_be('B')
 end)
 
+test('a same-key retry of the form submit answers the first result after the release (sandbox)', function()
+  -- The SDK rule: a retry replays before the form checks the new state. Tunnels keeps its own
+  -- operations (store = false), so its release form is a raw view, where the replay comes first.
+  local s = release_sandbox(legacy('A'))
+  local route = open_form(s)
+  local first = submit(s, route, {accept = true}, 'u1')
+  expect(first.result and first.result.released, show(first)).to_be(true)
+  local rev = s.rev
+  local again = submit(s, route, {accept = true}, 'u1')
+  expect(again.error, show(again)).to_be(nil)
+  expect(again.result.released, 'the first result').to_be(true)
+  expect(s.rev, 'no write').to_be(rev)
+end)
+
 test('the view and the agent path share the handler and keep separate key namespaces (sandbox)', function()
   local s = release_sandbox(legacy('A'))
   local route = open_form(s)
