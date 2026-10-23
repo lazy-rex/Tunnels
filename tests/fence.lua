@@ -1,8 +1,8 @@
 -- The cleanup attempt fence (tunnels.lua, "Fenced attempts"; reviewed design v3). Each new attempt
 -- has a random key and its own directory, made before its record is saved. The script and the
 -- plugin both claim <attempt>/claim; exactly one claim succeeds. A plugin claim ends the attempt (a
--- late create runs no down); a script claim waits for the attempt's exit file. A record without
--- fence_v (an older plugin) is never claimed. The sandbox tests use the stub file system of
+-- late create runs no down); a script claim waits for the attempt's exit file. A sending record is
+-- always fenced: the cleanups table refuses one without fence_v. The sandbox tests use the stub file system of
 -- tests/lib/sandbox.lua; the lab tests run the real tunnels-down.sh with the fake opentunnel.
 
 local tests_dir = debug.getinfo(1, 'S').source:match('^@?(.*)/[^/]*$')
@@ -226,7 +226,7 @@ test('the release gate: exit 0 does not free the profile while a down child of i
 end)
 
 test('the release gate holds a closing record whose result is 0 (sandbox)', function()
-  -- The block is gone and the result is 0 (also a legacy record), but a down child of the profile runs.
+  -- The block is gone and the result is 0, but a down child of the profile runs.
   local s = fence_sandbox({phase = 'closing', key = 'k1', saved_at = 0, block_id = 'gone', result = {ok = true}}, {processes = {PLUGIN, DOWN}})
   s:tick()
   expect(record(s).phase).to_be('closing')

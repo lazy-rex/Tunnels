@@ -1,5 +1,5 @@
 -- The Tunnels state in the plugin's SQL database (decision "One storage system": Tunnels moves from
--- hub.store to SQL). tunnels.lua sees one catalog table, as before:
+-- hub.store to SQL). tunnels.lua sees one catalog table:
 --   {intents = {[op key] = intent}, forwards = {[block ID] = forward}, cleanups = {[profile] =
 --   cleanup}, stops = {[op key] = stop}, fence = <path or nil>}
 -- Each kind is one table with one column per field. A field that the schema does not name fails the

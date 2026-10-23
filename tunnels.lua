@@ -34,7 +34,7 @@ assert(profile_prefix:match('^[%w_][%w_%-]*%-$'), 'LAZYREX_TUNNELS_PROFILE_PREFI
 local label_prefix = 'lazyrex-tunnel:'
 -- label_of answers the block label of Forward operation id. Rex refuses a label over 128
 -- characters (bad_request, Rex 0.0.1792158932-g88fd41). A user ID (at most 100 characters) is in
--- the label as before. An agent ID (fwd/...) can be longer, so its label has a 64-bit digest of the
+-- the label in full. An agent ID (fwd/...) can be longer, so its label has a 64-bit digest of the
 -- ID. A label is only a discovery hint: the proof is the full ID in the process argv (proven()).
 local function label_of(id)
   if id:sub(1, 4) ~= 'fwd/' then return label_prefix .. id end
@@ -740,7 +740,7 @@ local function start_forward(req)
   return result_for(intent, created.block_id)
 end
 
--- forward is the form submit (view path). Its key is the hub operation key, as before forward-v2.
+-- forward is the form submit (view path). Its key is the hub operation key.
 local function forward(args)
   local id = args.operation_key
   if type(id) ~= 'string' or not id:match('^[%w%-_%.:]+$') or #id > 100 then fail('invalid_input', 'Invalid operation key') end

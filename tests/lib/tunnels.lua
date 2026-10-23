@@ -130,7 +130,7 @@ return function(E, tests_dir)
     end
     error('edit: the state kept changing', 2)
   end
-  -- put_operation saves an operation result as an older plugin version did: {key, fingerprint, result}.
+  -- put_operation saves an operation result in the ops table directly: {key, fingerprint, result}.
   function T.put_operation(op)
     E.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', {op.key, op.fingerprint, rex.json.encode(op.result)})
   end
