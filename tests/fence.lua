@@ -32,7 +32,7 @@ local function fence_sandbox(c, o)
   for method, fn in pairs(o.rex or {}) do stubs[method] = fn end -- o.rex replaces a default stub
   local s = load_sandbox(T.plugin_dir, base, {
     vars = o.vars or {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture},
-    executables = {[T.fixture] = true}, fs = o.fs, exec = o.exec, processes = o.processes,
+    executables = o.executables or {[T.fixture] = true}, fs = o.fs, exec = o.exec, processes = o.processes,
     catalog = {fence = o.fence, cleanups = {[PROFILE] = c}},
     rex = stubs})
   box.s, s.calls = s, box.calls
@@ -70,6 +70,24 @@ test('a new attempt gets a fence, a random key and its own directory before its 
   expect(argv[5]).to_be(PROFILE)
   expect(argv[6]).to_be(c.attempt)
   expect(s.calls[1].args.label).to_be('lazyrex-tunnel-down:' .. c.key)
+end)
+
+-- A release lab can configure the stand-in of another checkout; the down runs the one of this checkout.
+local OTHER = '/tmp/x/tests/fake-opentunnel.sh'
+local OTHER_VARS = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = OTHER}
+
+test('a cleanup with the stand-in of another checkout configured runs down with this checkout\'s (sandbox)', function()
+  local s = fence_sandbox({phase = 'new'}, {vars = OTHER_VARS, executables = {[OTHER] = true, [T.fixture] = true}})
+  s:tick()
+  expect(#s.calls).to_be(1)
+  expect(s.calls[1].args.options.command[4]).to_be(T.fixture)
+end)
+
+test('a cleanup whose own stand-in is not executable sends no create (sandbox)', function()
+  local s = fence_sandbox({phase = 'new'}, {vars = OTHER_VARS, executables = {[OTHER] = true}})
+  s:tick()
+  expect(#s.calls, 'no create').to_be(0)
+  expect(record(s).phase).to_be('new')
 end)
 
 test('an attempt directory that cannot be made sends no create and saves no attempt (sandbox)', function()

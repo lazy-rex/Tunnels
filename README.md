@@ -86,6 +86,12 @@ TMPDIR. `lazyrex.json` sets the lab environment: the stand-in `tests/fake-opentu
 the real opentunnel, a fake state directory in the lab, and the `lazyrexlab-` profile prefix. No
 test opens a public tunnel.
 
+With a lab profile prefix, the plugin runs only its own stand-in, `<plugin dir>/tests/fake-opentunnel.sh`.
+`LAZYREX_TUNNELS_OPENTUNNEL` must still name an executable stand-in (an absolute path that ends in
+`/tests/fake-opentunnel.sh`), but it can be the stand-in of another checkout. A release lab runs the
+old and the new version from different directories with one environment, and each version then
+runs its own stand-in.
+
 ```sh
 lazyrex-hub test
 ```

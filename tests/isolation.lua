@@ -42,9 +42,27 @@ test('a lab prefix with a real executable is refused', function()
     {['/opt/homebrew/bin/opentunnel'] = true}, 'lab profile prefix needs the fake opentunnel')
 end)
 
-test('a lab prefix with another file named fake-opentunnel.sh is refused', function()
-  refused({LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = '/tmp/x/tests/fake-opentunnel.sh'},
-    {['/tmp/x/tests/fake-opentunnel.sh'] = true}, 'lab profile prefix needs the fake opentunnel')
+-- A release lab runs the old and the new version from different directories with one environment,
+-- so the configured stand-in can be the one of another checkout. The plugin then runs its own.
+local other = '/tmp/x/tests/fake-opentunnel.sh'
+
+test('a lab prefix with the stand-in of another checkout runs the stand-in of this checkout', function()
+  local s = sandbox({LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = other},
+    {[other] = true, [fixture] = true})
+  local reply = forward(s)
+  assert_true(not reply.error, 'Forward succeeds: ' .. show(reply.error))
+  expect(#s.creates).to_be(1)
+  expect(s.creates[1].options.command[4]).to_be(fixture)
+end)
+
+test('a lab prefix whose own stand-in is not executable is refused, also with another checkout\'s', function()
+  refused({LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = other},
+    {[other] = true}, 'fake opentunnel of this checkout, .*, and it is not executable')
+end)
+
+test('a lab prefix with a configured stand-in that is not executable is refused', function()
+  refused({LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = other},
+    {[fixture] = true}, 'absolute path to an executable')
 end)
 
 test('an override must be an absolute executable path', function()

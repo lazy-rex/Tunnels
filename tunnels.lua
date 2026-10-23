@@ -48,15 +48,22 @@ local function label_of(id)
 end
 local function executable(path) local r = rex.exec({'/bin/test', '-x', path}, {timeout = 5}); return r and r.ok end
 -- find_opentunnel answers the binary, or nil and the reason. A configured binary must be an absolute
--- executable path. A lab prefix uses only the stand-in of this checkout, plugin_dir/tests/fake-opentunnel.sh,
--- by its exact path: a lab never reaches the real opentunnel. A Rex pane does not get a login PATH, so without a configured
--- binary the plugin looks in the usual install places.
+-- executable path. A lab prefix runs only the stand-in of this checkout, plugin_dir/tests/fake-opentunnel.sh:
+-- the configured path must name a stand-in (it ends in /tests/fake-opentunnel.sh), and the plugin
+-- runs its own, so a lab never reaches the real opentunnel or a file outside this checkout. The
+-- configured stand-in may be the one of another checkout: a release lab runs the old and the new
+-- version from different directories with one environment. A Rex pane does not get a login PATH,
+-- so without a configured binary the plugin looks in the usual install places.
+local stand_in = '/tests/fake-opentunnel.sh'
 local function find_opentunnel()
   local configured = os.getenv('LAZYREX_TUNNELS_OPENTUNNEL')
   if configured and configured ~= '' then
     if configured:sub(1, 1) ~= '/' or not executable(configured) then return nil, 'LAZYREX_TUNNELS_OPENTUNNEL must be an absolute path to an executable' end
-    if profile_prefix ~= default_prefix and configured ~= plugin_dir .. '/tests/fake-opentunnel.sh' then return nil, 'A lab profile prefix needs the fake opentunnel' end
-    return configured
+    if profile_prefix == default_prefix then return configured end
+    if configured:sub(-#stand_in) ~= stand_in then return nil, 'A lab profile prefix needs the fake opentunnel' end
+    local own = plugin_dir .. stand_in
+    if not executable(own) then return nil, 'A lab profile prefix needs the fake opentunnel of this checkout, ' .. own .. ', and it is not executable' end
+    return own
   end
   if profile_prefix ~= default_prefix then return nil, 'A lab profile prefix needs the fake opentunnel' end
   local home = os.getenv('HOME') or ''
