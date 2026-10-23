@@ -125,10 +125,12 @@ function M.scan(current_session, api)
   -- An empty -p selection must never become a machine-wide listener scan.
   if #selected == 0 then return result end
   -- lsof is /usr/sbin/lsof on macOS and /usr/bin/lsof on Linux (Ubuntu). A missing binary fails
-  -- the exec at once, so the scan tries the next path.
+  -- the exec at once, so the scan tries the next path. -w: on Linux, lsof warns on stderr about each
+  -- file system that it cannot stat (Docker and FUSE mounts on the lab host), and the scan reports
+  -- stderr as a warning.
   local sockets
   for _, path in ipairs(LSOF) do
-    sockets, err = api.exec({path, '-nP', '-a', '-p', join(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn'}, {timeout = 3})
+    sockets, err = api.exec({path, '-nP', '-a', '-p', join(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn', '-w'}, {timeout = 3})
     if sockets then break end
   end
   if not sockets then warn('lsof: ' .. detail(err)); return result end
