@@ -422,6 +422,27 @@ test('a script with a missing attempt directory runs no down', function()
   rex.call('block.close', {session_id = P, block_id = b})
 end)
 
+test('a script without an attempt, or with an empty argument, refuses with exit 2 and runs no down', function()
+  local p = T.port()
+  local profile = T.prefix .. p
+  local attempt = lab_attempts .. '/args' .. p
+  sh({'/bin/mkdir', attempt})
+  local script = T.plugin_dir .. '/tunnels-down.sh'
+  for name, args in pairs({
+    ['no attempt'] = {'k' .. p, T.fixture, profile},
+    ['empty key'] = {'', T.fixture, profile, attempt},
+    ['empty opentunnel'] = {'k' .. p, '', profile, attempt},
+    ['empty profile'] = {'k' .. p, T.fixture, '', attempt},
+    ['empty attempt'] = {'k' .. p, T.fixture, profile, ''},
+  }) do
+    local r = rex.exec({'/bin/sh', script, unpack(args)}, {timeout = 10})
+    expect(r and r.code, name).to_be(2)
+    expect(r.stderr, name).to_match('usage: tunnels%-down%.sh')
+  end
+  expect(T.down_calls(p), 'no down').to_be(0)
+  expect(#names(attempt), 'no claim').to_be(0)
+end)
+
 -- lost_create saves a fenced sending cleanup of port p with key and attempt, as after a lost create
 -- reply. A block that a test starts has another label, so the plugin cannot prove it as this attempt.
 local function lost_create(p, key, attempt)

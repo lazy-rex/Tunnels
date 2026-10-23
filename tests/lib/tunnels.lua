@@ -12,6 +12,14 @@ return function(E, tests_dir)
   function T.hold(key, saved_at)
     return {phase = 'sending', key = key, saved_at = saved_at, fence_v = 1, attempt = '/nonexistent/lazyrexlab-attempt/' .. key}
   end
+  -- attempt makes a real attempt directory of key in the lab (FAKE_OT_DIR) and answers its path, for a
+  -- tunnels-down.sh that a test starts itself: the script claims it and runs down.
+  function T.attempt(key)
+    local dir = T.fake .. '/attempts/' .. key
+    local r = rex.exec({'/bin/mkdir', '-p', dir}, {timeout = 5})
+    assert(r and r.ok, 'attempt: mkdir ' .. dir)
+    return dir
+  end
   math.randomseed(os.time())
   local next_port = 44000 + math.random(0, 600) * 20
   function T.port() next_port = next_port + 1; return next_port end

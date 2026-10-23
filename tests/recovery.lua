@@ -169,10 +169,12 @@ test('a cleanup attempt whose running write was lost is proven and finished, aft
   local profile = T.prefix .. p
   local P = plugin_session()
   local key = 'lost-running-' .. p
-  save(function(v) v.cleanups[profile] = T.hold(key, os.time() - 1) end)
-  -- The block of the attempt, as session.new_block made it before its reply was lost.
-  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  local saved_at, attempt = os.time() - 1, T.attempt(key)
+  -- The block of the attempt, as session.new_block made it before its reply was lost. It starts
+  -- before the record is saved, so its script claims the attempt before maintenance can.
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile, attempt})
   wait('down ran', function() return T.down_calls(p) == 1 end, 10)
+  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = saved_at, fence_v = 1, attempt = attempt} end)
   T.open_panel(pane) -- a render kicks maintenance
   T.no_cleanup_for(p)
   expect(T.down_calls(p), 'down ran once').to_be(1)
@@ -186,8 +188,9 @@ test('a completed attempt that is still sending at a plugin restart is proven an
   local P = plugin_session()
   local key = 'restart-sending-' .. p
   H.hub('hub.admin.stop', {plugin = 'tunnels'})
-  save(function(v) v.cleanups[profile] = T.hold(key, os.time() - 1) end)
-  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  local attempt = T.attempt(key)
+  save(function(v) v.cleanups[profile] = {phase = 'sending', key = key, saved_at = os.time() - 1, fence_v = 1, attempt = attempt} end)
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile, attempt})
   wait('down ran', function() return T.down_calls(p) == 1 end, 10)
   expect(T.catalog().cleanups[profile].phase).to_be('sending')
   H.hub('hub.admin.start', {plugin = 'tunnels'})
@@ -202,10 +205,11 @@ test('an adopted attempt that is killed before its receipt runs down again', fun
   local profile = T.prefix .. p
   local P = plugin_session()
   local key = 'killed-' .. p
+  local attempt = T.attempt(key)
   T.flag('slow-down', true)
-  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile})
+  local b = labeled(P, 'lazyrex-tunnel-down:' .. key, {'/bin/sh', T.plugin_dir .. '/tunnels-down.sh', key, T.fixture, profile, attempt})
   wait('down runs', function() return T.down_calls(p) == 1 end, 10)
-  save(function(v) v.cleanups[profile] = {phase = 'running', key = key, saved_at = os.time() - 1, block_id = b} end)
+  save(function(v) v.cleanups[profile] = {phase = 'running', key = key, saved_at = os.time() - 1, block_id = b, fence_v = 1, attempt = attempt} end)
   T.flag('slow-down', false)
   -- Kill the wrapper and its down (one process group) before the receipt. The test made this
   -- block, and checks that the PID runs its attempt.
