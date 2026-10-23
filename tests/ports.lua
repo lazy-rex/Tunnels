@@ -67,6 +67,37 @@ test('scan: descendant filtering, cycle termination, partial failures, empty sel
   expect(count.n, 'no lsof call without selected PIDs').to_be(1)
 end)
 
+test('scan: pids near 4 million (Linux) finish in under 2 s of CPU time', function()
+  -- Rex Lua: one large integer key in a new table costs time in proportion to the key (key 4177700:
+  -- about 125 ms; observed on Rex 0.0.1792593189-g3f4a0a, Linux lab host, 2026-10-23). Linux pids
+  -- reach millions, so the scan keys its tables by text.
+  local root = 4000000
+  local api = {}
+  function api.call(method)
+    if method == 'session.list' then return {sessions = {{session_id = 's'}}} end
+    if method == 'session.view' then return {windows = {}} end
+    if method == 'session.list_blocks' then return {blocks = {{creator_name = 'com.superlogical.terminal', block_id = 'b', window_id = 'w'}}} end
+    if method == 'com.superlogical.terminal.process' then return {child = {pid = root}} end
+    return {}
+  end
+  function api.exec(argv)
+    if argv[1] == '/bin/ps' then
+      local lines = {root .. ' 1 shell'}
+      for i = 1, 100 do lines[#lines + 1] = (root + i) .. ' ' .. (root + i - 1) .. ' worker' end
+      for i = 1, 100 do lines[#lines + 1] = (4100000 + i) .. ' 1 outside' end
+      return {ok = true, stdout = table.concat(lines, '\n') .. '\n'}
+    end
+    return {ok = true, stdout = 'p' .. (root + 100) .. '\ncworker\nn127.0.0.1:3000\n'}
+  end
+  local t = os.clock()
+  local r = ports.scan('s', api)
+  local spent = os.clock() - t
+  expect(#r.warnings, r.warnings[1]).to_be(0)
+  expect(#r.ports).to_be(1)
+  expect(r.ports[1].pid).to_be(root + 100)
+  assert_true(spent < 2, string.format('the scan took %.1f s of CPU time', spent))
+end)
+
 -- --- The real plugin on the lab server ---
 
 math.randomseed(os.time())

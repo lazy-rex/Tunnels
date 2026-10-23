@@ -29,12 +29,20 @@ local function detail(err)
   return tostring(err or 'request failed')
 end
 
--- Only the process name is read. Arguments can contain credentials.
+-- pid_key answers the table key of a pid: its decimal text. Rex Lua: one large integer key in a new
+-- table costs time in proportion to the key (key 4177700: about 125 ms; observed on Rex
+-- 0.0.1792593189-g3f4a0a, Linux lab host, 2026-10-23; LazyRex docs/rex-protocol.md), and Linux pids
+-- reach millions. So no table here is keyed by a pid number.
+local function pid_key(n) return string.format('%d', n) end
+local LSOF = {'/usr/sbin/lsof', '/usr/bin/lsof'}
+
+-- Only the process name is read. Arguments can contain credentials. parse_ps answers
+-- {[pid_key(pid)] = {parent = pid_key(ppid), command}}.
 function M.parse_ps(output)
   local rows = {}
   for line in output:gmatch('[^\n]+') do
     local p, parent, command = line:match('^%s*(%d+)%s+(%d+)%s+(.+)$')
-    if pid(p) then rows[tonumber(p)] = {parent = tonumber(parent), command = command} end
+    if pid(p) then rows[pid_key(tonumber(p))] = {parent = pid_key(tonumber(parent)), command = command} end
   end
   return rows
 end
@@ -97,7 +105,7 @@ function M.scan(current_session, api)
           local process = call('com.superlogical.terminal.process', {session_id = sid, block_id = block.block_id, args = {}})
           local child = process and process.child and pid(process.child.pid)
           if child then
-            roots[child] = {session_id = sid, window_id = block.window_id or '', block_id = block.block_id,
+            roots[pid_key(child)] = {session_id = sid, window_id = block.window_id or '', block_id = block.block_id,
               tab = tabs[block.window_id] or '', excluded = infrastructure(block.label)}
           end
         end
@@ -113,12 +121,16 @@ function M.scan(current_session, api)
     local pane = owner(process, roots, processes)
     if pane and not pane.excluded then owners[process] = pane; selected[#selected + 1] = process end
   end
-  table.sort(selected)
-  for i, process in ipairs(selected) do selected[i] = tostring(process) end
+  table.sort(selected, function(a, b) return tonumber(a) < tonumber(b) end)
   -- An empty -p selection must never become a machine-wide listener scan.
   if #selected == 0 then return result end
+  -- lsof is /usr/sbin/lsof on macOS and /usr/bin/lsof on Linux (Ubuntu). A missing binary fails
+  -- the exec at once, so the scan tries the next path.
   local sockets
-  sockets, err = api.exec({'/usr/sbin/lsof', '-nP', '-a', '-p', join(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn'}, {timeout = 3})
+  for _, path in ipairs(LSOF) do
+    sockets, err = api.exec({path, '-nP', '-a', '-p', join(selected, ','), '-iTCP', '-sTCP:LISTEN', '-Fpcn'}, {timeout = 3})
+    if sockets then break end
+  end
   if not sockets then warn('lsof: ' .. detail(err)); return result end
   -- lsof exits 1 when no selected process has a listening socket.
   if sockets.timed_out or (not sockets.ok and sockets.code ~= 1) then
@@ -127,11 +139,11 @@ function M.scan(current_session, api)
   end
   if sockets.stderr and sockets.stderr ~= '' then warn('lsof: ' .. sockets.stderr) end
   for _, socket in ipairs(M.parse_lsof(sockets.stdout or '')) do
-    local pane = owners[socket.pid]
+    local pane = owners[pid_key(socket.pid)]
     if pane then
       result.ports[#result.ports + 1] = {session_id = pane.session_id, window_id = pane.window_id,
         block_id = pane.block_id, tab = pane.tab, pid = socket.pid,
-        command = processes[socket.pid].command, port = socket.port, address = socket.address}
+        command = processes[pid_key(socket.pid)].command, port = socket.port, address = socket.address}
     end
   end
   table.sort(result.ports, function(a, b)
