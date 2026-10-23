@@ -81,8 +81,11 @@ test('every kind, a missing optional field, nested JSON and the fence round-trip
       ['rt-4'] = {phase = 'new'}},
   }
   expect(next(before.forwards) == nil and next(before.intents) == nil, 'no state before').to_be(true)
-  -- The plugin is idle here (no state, no open view, so no maintenance timer): it does not act on
-  -- the rows between their write and the read.
+  -- The plugin is stopped from the write to the read, so it cannot act on the rows. An idle plugin is
+  -- not enough: just after the start it can still run maintenance, and maintenance can remove a forward
+  -- whose block does not exist, here rt-forward. Observed on the Linux lab host (Rex
+  -- 0.0.1792593189-g3f4a0a, hub 4b78583c): the read had no forward.
+  H.hub('hub.admin.stop', {plugin = 'tunnels'})
   local M = dofile(T.plugin_dir .. '/tunnels_store.lua')
   for _, k in ipairs(M.KINDS) do
     for key, record in pairs(c[k.field]) do
@@ -98,6 +101,8 @@ test('every kind, a missing optional field, nested JSON and the fence round-trip
     for key in pairs(c[k.field]) do T.sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1', {key}) end
   end
   T.sql_write("DELETE FROM meta WHERE name = 'fence'")
+  H.hub('hub.admin.start', {plugin = 'tunnels'})
+  wait('the plugin answers again', function() return pcall(T.list, alice) end, 20)
   for _, kind in ipairs({'intents', 'forwards', 'stops', 'cleanups'}) do expect(got[kind], kind).to_equal(c[kind]) end
   expect(got.fence).to_be('/rt/fence')
   -- A missing optional field is nil, not a JSON null sentinel.
