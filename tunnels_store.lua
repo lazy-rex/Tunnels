@@ -1,5 +1,5 @@
--- The Tunnels state in the plugin's SQL database (decision "One storage system": Tunnels moves from
--- hub.store to SQL). tunnels.lua sees one catalog table:
+-- The Tunnels state in the plugin's SQL database (decision "One storage system"). tunnels.lua
+-- sees one catalog table:
 --   {intents = {[op key] = intent}, forwards = {[block ID] = forward}, cleanups = {[profile] =
 --   cleanup}, stops = {[op key] = stop}, fence = <path or nil>}
 -- Each kind is one table with one column per field. A field that the schema does not name fails the
@@ -61,8 +61,7 @@ function M.row_json(k)
   for _, c in ipairs(k.columns) do list[#list + 1] = "'" .. c .. "', " .. (k.json[c] and 'json(' .. c .. ')' or c) end
   return "json_patch('{}', json_object(" .. table.concat(list, ', ') .. '))'
 end
--- CATALOG is ONE statement, so a read outside a transaction (a render) is one snapshot, as the one
--- hub.store record was.
+-- CATALOG is ONE statement, so a read outside a transaction (a render) is one snapshot.
 do
   local parts = {}
   for _, k in ipairs(M.KINDS) do parts[#parts + 1] = "SELECT '" .. k.field .. "' AS kind, " .. k.key .. ' AS key, ' .. M.row_json(k) .. ' AS value FROM ' .. k.field end
@@ -189,81 +188,6 @@ function M.open(app)
       return {}
     end)
   end
-
-  -- The import (decision "One storage system"): at the first start on SQL, one transaction copies the
-  -- hub.store record "forwards" and every saved operation (hub.store.ops_scan) into the tables, and
-  -- sets meta import = 'done'. A later start imports nothing; a mark with another value fails the start.
-  -- The migration (the empty tables) commits before, in its own transaction. So a failed import leaves
-  -- the empty schema and no mark: the plugin does not start, hub.store keeps the state, and the next
-  -- start imports again. A field that the schema does not have, or a kind that is not a table, fails
-  -- the import. Four kinds are not imported:
-  -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
-  --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
-  --   prints one line for each.
-  -- - A cleanup after phase new with no fence (fence_v 1 and an attempt; an attempt of a plugin
-  --   without the fence): it fails the import, because nothing proves that its old script can never
-  --   run down. (The cleanups table refuses such a row too; this check names the profile and phase.)
-  -- - An intent whose fingerprint has the v1 Forward format: it fails the import. The intent is an
-  --   active reservation, not a saved result, so coord-tunnels-v1-op does not apply. Maintenance
-  --   could adopt it and save a new v1 result that a retry can never match.
-  -- - An intent or a forward without a valid creator (a user, or an agent with an ID): it fails the
-  --   import (the tables refuse it too).
-  -- writes stays 0, so the release can tell that no write came after the import.
-  local function import()
-    local mark = db.first("SELECT value FROM meta WHERE name = 'import'")
-    if mark and mark.value == 'done' then return end
-    if mark then fail('internal', 'The import mark is ' .. tostring(mark.value) .. ', not done') end
-    local record = app.hub('hub.store.get', {keys = {'forwards'}}).records.forwards
-    -- An absent record (no value; hub.store answers {rev = '0'}) is an empty store.
-    local value = record and record.value
-    if value == nil then value = {} end
-    if type(value) ~= 'table' then fail('internal', 'The hub.store record forwards is not a table') end
-    local state = {intents = {}, forwards = {}, cleanups = {}, stops = {}}
-    for _, k in ipairs(M.KINDS) do
-      -- A missing kind is empty; a kind that is there must be a table (false or a scalar fails).
-      local list = value[k.field]
-      if list ~= nil and type(list) ~= 'table' then fail('internal', 'The hub.store record has ' .. k.field .. ' that is not a table') end
-      for key, x in pairs(list or {}) do state[k.field][key] = x end
-    end
-    -- The tables refuse a bad creator too (CREATOR); this check names the record.
-    for _, field in ipairs({'intents', 'forwards'}) do
-      for id, x in pairs(state[field]) do
-        local c = type(x) == 'table' and x.creator
-        if not (type(c) == 'table' and (c.kind == 'user' or (c.kind == 'agent' and type(c.agent) == 'string' and c.agent ~= ''))) then
-          fail('conflict', 'The import refuses the ' .. field:sub(1, -2) .. ' ' .. tostring(id) .. ': its creator is not a user or an agent')
-        end
-      end
-    end
-    for id, i in pairs(state.intents) do
-      if type(i) == 'table' and type(i.fingerprint) == 'string' and i.fingerprint:sub(1, 8) == 'forward/' then
-        fail('conflict', 'The import refuses the intent ' .. tostring(id) .. ': its fingerprint has the v1 Forward format')
-      end
-    end
-    for profile, c in pairs(state.cleanups) do
-      if type(c) == 'table' and c.phase ~= 'new' and not (c.fence_v == 1 and type(c.attempt) == 'string') then
-        fail('conflict', 'The import refuses the cleanup of ' .. tostring(profile) .. ': it is ' .. tostring(c.phase) .. ' with no fence')
-      end
-    end
-    for field in pairs(value) do
-      if not state[field] and field ~= 'fence' then fail('internal', 'The import has no table for the field ' .. tostring(field)) end
-    end
-    if value.fence ~= nil then state.fence = value.fence end
-    write({intents = {}, forwards = {}, cleanups = {}, stops = {}}, state)
-    local after = nil
-    repeat
-      local page = app.hub('hub.store.ops_scan', {after = after, limit = 500})
-      for _, op in ipairs(page.ops or {}) do
-        if type(op.fingerprint) == 'string' and op.fingerprint:sub(1, 8) == 'forward/' then
-          print('tunnels: the import drops the operation ' .. op.key .. ': its fingerprint has the v1 Forward format (coord-tunnels-v1-op)')
-        else
-          db.exec('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', op.key, op.fingerprint, json.encode(op.result))
-        end
-      end
-      after = page.next
-    until after == nil
-    db.exec("INSERT INTO meta (name, value) VALUES ('import', 'done')")
-  end
-  app.start(import)
 
   return S
 end

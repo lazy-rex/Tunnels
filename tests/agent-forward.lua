@@ -252,13 +252,9 @@ local function form_forward(s, key, port, source_block)
     input = {values = {port = 'other', other = tostring(port)}}, context = {session_id = 's', source_block_id = source_block}, operation_key = key})
 end
 
-test('the view path conflicts on a v1 result and on a changed source pane (sandbox)', function()
-  -- A v1 fingerprint (forward/...) is other content: the import drops such results (coord-tunnels-v1-op).
-  local v1 = {fingerprint = 'forward/5:other/4:4321/s', result = {panel = {command = 'tunnels'}}}
-  local s = form_sandbox({['old-key'] = v1})
-  expect(form_forward(s, 'old-key', 4321, 'pane-a').error.code).to_be('operation_conflict')
-  expect(#s.creates).to_be(0)
+test('the view path conflicts on a changed source pane (sandbox)', function()
   -- A key is saved with forward-v2, which has the source pane.
+  local s = form_sandbox({})
   expect(form_forward(s, 'new-key', 4323, 'pane-a').result).to_equal({panel = {command = 'tunnels'}})
   expect(#s.creates).to_be(1)
   expect(s.ops['new-key'].fingerprint).to_be('forward-v2/5:other/1:s/6:pane-a/4:4323/')
