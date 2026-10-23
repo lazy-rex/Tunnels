@@ -7,7 +7,8 @@
 -- It answers the stub state: the event handlers, the last reply, the new_block calls, the hub actions
 -- that the plugin called (hub_calls), the saved
 -- catalog, the saved operation records (ops), and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
--- s:tick() runs the timers that the plugin set. The registration timer has run at load.
+-- s:tick() runs the timers that the plugin set. The registration timer has run at load. os.exit sets
+-- s.exited.
 -- s.fs is a small file system in memory for the cleanup fence: path -> {dir = true}, {link = target}
 -- or {data = text}. The stub answers /bin/test -d, /bin/mkdir [-p], /bin/ln -s, /usr/bin/readlink
 -- and /bin/cat from it. opts.fs gives the start state; opts.exec(argv) answers a call first, when it
@@ -83,6 +84,9 @@ return function(plugin_dir, base, opts)
       if overrides[method] then return overrides[method](args) end
       if method == 'client.perform' then
         s.hub_calls[#s.hub_calls + 1] = args.action
+        -- The limits that the hub sends (hub/cmd/hub/replyparts.go, partsLimits, hub main cd53575): the
+        -- SDK takes them from the hub.register reply and fails its start without them.
+        if args.action == 'hub.register' then return {result = {generation = '1', limits = {inline_max = 45056, part_bytes = 57344, max_total = 786432}}} end
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 's'}} end
         return {result = {}}
       end
@@ -94,7 +98,7 @@ return function(plugin_dir, base, opts)
       return {}
     end,
   }
-  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end}, {__index = os})}, {__index = base})
+  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end, exit = function(code) s.exited = code end}, {__index = os})}, {__index = base})
   -- The fake store answers copies: a change that the plugin does not write must not reach s.catalog.
   local store = {}
   function store.catalog()
