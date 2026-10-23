@@ -102,6 +102,8 @@ end)
 
 math.randomseed(os.time())
 local base = 41000 + math.random(0, 400) * 20
+-- LSOF is the lsof of the host: /usr/sbin/lsof on macOS, /usr/bin/lsof on Linux (Ubuntu).
+local LSOF = rex.exec({'/bin/test', '-x', '/usr/sbin/lsof'}).code == 0 and '/usr/sbin/lsof' or '/usr/bin/lsof'
 local alice = agent('alice')
 
 -- listen opens a tab in session that runs a shell with nc as its child, on 127.0.0.1:port.
@@ -169,7 +171,8 @@ test('a descendant listener belongs to its pane; the given session sorts first',
     expect(p.window_id).to_be(l.window)
     expect(p.session_id).to_be(l.session)
     expect(p.address).to_be('127.0.0.1')
-    expect(p.command).to_be('/usr/bin/nc') -- the ps command name, never its arguments
+    -- The ps command name, never its arguments: the path on macOS, the base name on Linux (procps comm).
+    assert_true(p.command == '/usr/bin/nc' or p.command == 'nc', 'the command is nc, without arguments: ' .. tostring(p.command))
   end
 end)
 
@@ -185,7 +188,7 @@ test('a listener outside every pane is not a choice', function()
   assert_true(pid, 'the outside listener started')
   local ok, err = pcall(function()
     wait('the outside listener listens', function()
-      local r = rex.exec({'/usr/sbin/lsof', '-nP', '-a', '-p', tostring(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'}, {timeout = 5})
+      local r = rex.exec({LSOF, '-nP', '-a', '-p', tostring(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'}, {timeout = 5})
       return r and r.ok and (r.stdout or ''):find(':' .. port, 1, true)
     end, 10)
     expect(row(scan(a), port)).to_be(nil)
@@ -224,7 +227,7 @@ local function lists(form, port) return options(form):find('|' .. port .. '|', 1
 -- listening waits until lsof shows a listener on port, without a plugin scan.
 local function listening(port)
   wait('a listener on ' .. port, function()
-    local r = rex.exec({'/usr/sbin/lsof', '-nP', '-iTCP:' .. port, '-sTCP:LISTEN', '-Fp'}, {timeout = 5})
+    local r = rex.exec({LSOF, '-nP', '-iTCP:' .. port, '-sTCP:LISTEN', '-Fp'}, {timeout = 5})
     return r and r.ok and (r.stdout or ''):find('p%d')
   end, 10)
 end

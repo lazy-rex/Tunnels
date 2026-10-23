@@ -96,7 +96,7 @@ return function(E, tests_dir)
   end
   function T.listening(p)
     E.wait('a listener on ' .. p, function()
-      local ok, r = sh('/usr/sbin/lsof -nP -iTCP:' .. p .. ' -sTCP:LISTEN -Fp')
+      local ok, r = sh('$([ -x /usr/sbin/lsof ] && echo /usr/sbin/lsof || echo /usr/bin/lsof) -nP -iTCP:' .. p .. ' -sTCP:LISTEN -Fp')
       return ok and (r.stdout or ''):find('p%d')
     end, 10)
   end
