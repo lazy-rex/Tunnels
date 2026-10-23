@@ -83,11 +83,24 @@ test('the import refuses a sending cleanup with no fence, and an unknown field; 
   local f = fixture({cleanups = {['lazyrex-1'] = {phase = 'sending', key = 'k', saved_at = 7}}}, {})
   expect(f.error and f.error.code).to_be('conflict')
   expect(#f.execs, 'nothing is written').to_be(0)
-  f = fixture({forwards = {b1 = {port = 1, colour = 'red'}}}, {})
+  f = fixture({forwards = {b1 = {port = 1, creator = {kind = 'user'}, colour = 'red'}}}, {})
   expect(f.error and f.error.code).to_be('internal')
   expect(f.error.message).to_match('colour')
   f = fixture({other = {}}, {})
   expect(f.error and f.error.code).to_be('internal')
+end)
+
+test('the import refuses an intent or a forward whose creator is not a user or an agent with an ID; it writes nothing (fixture)', function()
+  for name, creator in pairs({none = false, text = 'user', ['no kind'] = {}, bot = {kind = 'bot'}, ['no agent'] = {kind = 'agent'},
+      ['empty agent'] = {kind = 'agent', agent = ''}, ['number agent'] = {kind = 'agent', agent = 5}}) do
+    local c = creator or nil
+    for _, kind in ipairs({'intents', 'forwards'}) do
+      local f = fixture({[kind] = {r1 = {session_id = 's', port = 4325, profile = 'lazyrex-4325', creator = c}}}, {})
+      expect(f.error and f.error.code, kind .. ', ' .. name).to_be('conflict')
+      expect(f.error.message, kind .. ', ' .. name).to_match('r1: its creator is not a user or an agent')
+      expect(#f.execs, kind .. ', ' .. name .. ': nothing is written').to_be(0)
+    end
+  end
 end)
 
 test('the import refuses an intent with a v1 Forward fingerprint; it writes nothing (fixture)', function()

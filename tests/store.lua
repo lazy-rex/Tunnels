@@ -131,6 +131,26 @@ test('a NULL fence_v does not pass the cleanups CHECK, on INSERT or on the UPDAT
   sql_write("DELETE FROM cleanups WHERE profile = 'ck-6'")
 end)
 
+test('the intents and forwards tables refuse a creator that is not a user or an agent with an ID (lab)', function()
+  local bad = {
+    ['SQL NULL'] = {null = true}, ['JSON null'] = 'null', ['a JSON string'] = '"x"', ['a JSON array'] = '[1]',
+    ['not JSON'] = '{', ['no kind'] = '{}', ['an unknown kind'] = '{"kind":"bot"}', ['no agent'] = '{"kind":"agent"}',
+    ['an empty agent'] = '{"kind":"agent","agent":""}', ['a number agent'] = '{"kind":"agent","agent":5}',
+    ['a null agent'] = '{"kind":"agent","agent":null}',
+  }
+  -- The plugin is idle (no state, no open view), and each good row goes before maintenance can act.
+  for _, t in ipairs({{name = 'intents', key = 'id'}, {name = 'forwards', key = 'block_id'}}) do
+    for name, creator in pairs(bad) do
+      expect_error(function() sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-x', creator}) end, 'CHECK')
+      expect(sql('SELECT creator FROM ' .. t.name .. ' WHERE ' .. t.key .. " = 'cr-x'")[1], t.name .. ', ' .. name .. ': no row').to_be(nil)
+    end
+    for i, creator in ipairs({'{"kind":"user"}', '{"kind":"agent","agent":"alice"}'}) do
+      sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-ok' .. i, creator})
+      sql_write('DELETE FROM ' .. t.name .. ' WHERE ' .. t.key .. ' = ?1', {'cr-ok' .. i})
+    end
+  end
+end)
+
 local function writes() return sql("SELECT value FROM meta WHERE name = 'writes'")[1].value end
 local function part(v) v = tostring(v); return #v .. ':' .. v .. '/' end
 test('an operation result and the write counter commit with the change, or not at all (lab)', function()

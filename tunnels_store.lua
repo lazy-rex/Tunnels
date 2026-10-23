@@ -14,9 +14,15 @@ local M = {}
 -- a Lua table as JSON text; the other columns hold a string or a number. check: a row rule that SQL
 -- enforces for every writer. A CHECK accepts a NULL result, so it uses IS (NULL IS 1 is false; NULL = 1
 -- is NULL).
+-- CREATOR: an intent and a forward have a creator: {"kind":"user"}, or {"kind":"agent","agent":<text
+-- that is not empty>}. CASE branches run lazily, so json_type never sees text that is not JSON.
+local CREATOR = "CASE WHEN json_valid(creator) IS NOT 1 THEN 0 WHEN json_type(creator) IS NOT 'object' THEN 0"
+  .. " WHEN json_extract(creator, '$.kind') IS 'user' THEN 1"
+  .. " WHEN json_extract(creator, '$.kind') IS 'agent' THEN json_type(creator, '$.agent') IS 'text' AND json_extract(creator, '$.agent') IS NOT ''"
+  .. " ELSE 0 END"
 M.KINDS = {
-  {field = 'intents', key = 'id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'creator', 'fingerprint', 'created', 'saved_at', 'phase'}, json = {creator = true}},
-  {field = 'forwards', key = 'block_id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'op', 'created', 'creator', 'url'}, json = {creator = true}},
+  {field = 'intents', key = 'id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'creator', 'fingerprint', 'created', 'saved_at', 'phase'}, json = {creator = true}, check = CREATOR},
+  {field = 'forwards', key = 'block_id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'op', 'created', 'creator', 'url'}, json = {creator = true}, check = CREATOR},
   {field = 'stops', key = 'id', columns = {'forward', 'session_id', 'port', 'profile', 'fingerprint', 'saved_at'}},
   -- A sending cleanup is always fenced (decision "Cleanup attempt fence"): its create result can be
   -- unknown, and only the claim of its attempt proves that it can never run down.
@@ -189,7 +195,7 @@ function M.open(app)
   -- The migration (the empty tables) commits before, in its own transaction. So a failed import leaves
   -- the empty schema and no mark: the plugin does not start, hub.store keeps the state, and the next
   -- start imports again. A field that the schema does not have, or a kind that is not a table, fails
-  -- the import. Three kinds are not imported:
+  -- the import. Four kinds are not imported:
   -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
   --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
   --   prints one line for each.
@@ -199,6 +205,8 @@ function M.open(app)
   -- - An intent whose fingerprint has the v1 Forward format: it fails the import. The intent is an
   --   active reservation, not a saved result, so coord-tunnels-v1-op does not apply. Maintenance
   --   could adopt it and save a new v1 result that a retry can never match.
+  -- - An intent or a forward without a valid creator (a user, or an agent with an ID): it fails the
+  --   import (the tables refuse it too).
   -- writes stays 0, so the release can tell that no write came after the import.
   local function import()
     local mark = db.first("SELECT value FROM meta WHERE name = 'import'")
@@ -215,6 +223,15 @@ function M.open(app)
       local list = value[k.field]
       if list ~= nil and type(list) ~= 'table' then fail('internal', 'The hub.store record has ' .. k.field .. ' that is not a table') end
       for key, x in pairs(list or {}) do state[k.field][key] = x end
+    end
+    -- The tables refuse a bad creator too (CREATOR); this check names the record.
+    for _, field in ipairs({'intents', 'forwards'}) do
+      for id, x in pairs(state[field]) do
+        local c = type(x) == 'table' and x.creator
+        if not (type(c) == 'table' and (c.kind == 'user' or (c.kind == 'agent' and type(c.agent) == 'string' and c.agent ~= ''))) then
+          fail('conflict', 'The import refuses the ' .. field:sub(1, -2) .. ' ' .. tostring(id) .. ': its creator is not a user or an agent')
+        end
+      end
     end
     for id, i in pairs(state.intents) do
       if type(i) == 'table' and type(i.fingerprint) == 'string' and i.fingerprint:sub(1, 8) == 'forward/' then

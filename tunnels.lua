@@ -566,12 +566,6 @@ local function part(value) value = tostring(value); return #value .. ':' .. valu
 local function stop_key(caller, key)
   return 'stop/' .. (caller == 'user' and part('user') or part('agent') .. part(caller.agent)) .. part(key)
 end
--- creator answers the creator of a forward. A missing or malformed creator is the user.
-local function creator(fw)
-  local c = fw.creator
-  if type(c) == 'table' and c.kind == 'agent' and type(c.agent) == 'string' and c.agent ~= '' then return c end
-  return {kind = 'user'}
-end
 -- finish_stop closes the block of a saved stop if Rex lists it, then commits the final batch. It
 -- answers the operation result. A failed Rex read or close raises, and the stop stays saved.
 local function finish_stop(id, st)
@@ -934,7 +928,8 @@ local function list_tunnels()
     if row.intent_id then
       pending[#pending + 1] = {id = row.intent_id, port = fw.port, target = fw.target, session_id = fw.session_id, state = row.state, created = fw.created}
     else
-      local c = creator(fw)
+      -- The forwards table refuses a row without a valid creator (tunnels_store.lua).
+      local c = fw.creator
       forwards[#forwards + 1] = {id = row.block_id, port = fw.port, target = fw.target, url = row.url, state = row.state,
         session_id = fw.session_id, session_label = known[fw.session_id] and known[fw.session_id].label or nil,
         source_block = fw.source_block, created = fw.created, created_by = c.kind == 'agent' and c.agent or 'user',

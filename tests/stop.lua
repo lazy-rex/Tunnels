@@ -50,7 +50,7 @@ local function seed(p, agent_id, extra)
   T.edit(function(value)
     value.forwards = value.forwards or {}
     value.forwards[b.block_id] = {session_id = S, source_block = source, port = p, target = '127.0.0.1:' .. p, profile = 'lazyrexlab-' .. p,
-    op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = agent_id and {kind = 'agent', agent = agent_id} or nil}
+    op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = agent_id and {kind = 'agent', agent = agent_id} or {kind = 'user'}}
     for k, v in pairs(extra or {}) do value[k] = v end
   end)
   return b.block_id
@@ -80,9 +80,9 @@ test('the user stops a forward from the panel; tunnels.list and Rex agree', func
   no_cleanup_for(p)
 end)
 
-test('an agent stops a user forward, a forward without a creator and one with a malformed creator', function()
+test('an agent stops a user forward; the key replays; the same key with another forward conflicts', function()
   -- The user decision "Agents may act on anything": an agent may stop any forward.
-  local p1, p2, p3 = port(), port(), port()
+  local p1, p2 = port(), port()
   local f = forward_by_user(p1)
   expect(f.created_by).to_be('user')
   -- The run script calls down before serve; serve connects after it. Count from then on.
@@ -94,17 +94,13 @@ test('an agent stops a user forward, a forward without a creator and one with a 
   expect(listed(f.id)).to_be(nil)
   -- The key replays its first result; the same key with another forward conflicts.
   expect(alice:call('tunnels.stop', {forward = f.id, key = 'user-fw'})).to_equal(r)
-  local legacy = seed(p2) -- no creator
-  expect(listed(legacy).created_by).to_be('user')
-  expect_error(function() alice:call('tunnels.stop', {forward = legacy, key = 'user-fw'}) end, 'operation_conflict')
-  assert_true(blocks()[legacy], 'the conflict closed nothing')
-  expect(alice:call('tunnels.stop', {forward = legacy, key = 'legacy-fw'})).to_equal({forward = legacy, stopped = true})
-  expect(blocks()[legacy]).to_be(nil)
-  local malformed = seed(p3)
-  T.edit(function(value) value.forwards[malformed].creator = {kind = 'agent', agent = ''} end)
-  expect(bob:call('tunnels.stop', {forward = malformed, key = 'malformed-fw'})).to_equal({forward = malformed, stopped = true})
-  expect(blocks()[malformed]).to_be(nil)
-  for _, p in ipairs({p1, p2, p3}) do no_cleanup_for(p) end
+  local other = seed(p2) -- a user forward
+  expect(listed(other).created_by).to_be('user')
+  expect_error(function() alice:call('tunnels.stop', {forward = other, key = 'user-fw'}) end, 'operation_conflict')
+  assert_true(blocks()[other], 'the conflict closed nothing')
+  expect(alice:call('tunnels.stop', {forward = other, key = 'other-fw'})).to_equal({forward = other, stopped = true})
+  expect(blocks()[other]).to_be(nil)
+  for _, p in ipairs({p1, p2}) do no_cleanup_for(p) end
   expect(down_calls(p1) - downs, 'one cleanup down for the user forward').to_be(1)
 end)
 
