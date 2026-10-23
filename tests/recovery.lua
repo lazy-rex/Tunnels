@@ -232,7 +232,7 @@ local function cleanup_sandbox(screen, closes)
   local state = {closes = 0, listed = true}
   local s = load_sandbox(T.plugin_dir, base, {
     vars = {LAZYREX_TUNNELS_PROFILE_PREFIX = 'lazyrexlab-', LAZYREX_TUNNELS_OPENTUNNEL = T.fixture}, executables = {[T.fixture] = true},
-    catalog = {cleanups = {['lazyrexlab-4321'] = {phase = 'running', key = 'k1', saved_at = 0, block_id = 'd'}}},
+    catalog = {cleanups = {['lazyrexlab-4321'] = {phase = 'running', key = 'k1', saved_at = 0, block_id = 'd', fence_v = 1, attempt = '/sandbox/attempts/k1'}}},
     rex = {
       ['session.list'] = function() return {sessions = {{session_id = 'plugin'}}} end,
       ['session.list_blocks'] = function() return {blocks = state.listed and {{block_id = 'd', placement = 'detached'}} or {}} end,

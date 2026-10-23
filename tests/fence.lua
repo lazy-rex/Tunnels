@@ -227,7 +227,7 @@ end)
 
 test('the release gate holds a closing record whose result is 0 (sandbox)', function()
   -- The block is gone and the result is 0, but a down child of the profile runs.
-  local s = fence_sandbox({phase = 'closing', key = 'k1', saved_at = 0, block_id = 'gone', result = {ok = true}}, {processes = {PLUGIN, DOWN}})
+  local s = fence_sandbox({phase = 'closing', key = 'k1', saved_at = 0, block_id = 'gone', result = {ok = true}, fence_v = 1, attempt = ROOT .. '/f1/k1'}, {processes = {PLUGIN, DOWN}})
   s:tick()
   expect(record(s).phase).to_be('closing')
   s.processes = {PLUGIN}
@@ -236,23 +236,20 @@ test('the release gate holds a closing record whose result is 0 (sandbox)', func
 end)
 
 test('a running block that disappears retries only when nothing of its attempt runs (sandbox)', function()
-  for _, fenced_record in ipairs({true, false}) do
-    local c = {phase = 'running', key = 'we', saved_at = 0, block_id = 'gone'}
-    if fenced_record then c.fence_v, c.attempt = 1, ROOT .. '/f1/we' end
-    local s = fence_sandbox(c, {processes = {PLUGIN, wrapper_line('we')}})
-    s:tick()
-    expect(record(s).phase, 'the wrapper runs').to_be('running')
-    s.processes = {PLUGIN, DOWN}
-    s:tick()
-    expect(record(s).phase, 'a down child runs').to_be('running')
-    expect(#s.calls, 'no new attempt while one runs').to_be(0)
-    -- Nothing runs: retry, and a new attempt (a later timer of the same tick can already send it).
-    s.processes = {PLUGIN}
-    s:tick()
-    s:tick()
-    expect(#s.calls, 'a new attempt').to_be(1)
-    assert_true(record(s).key ~= 'we', 'with a new key')
-  end
+  local c = {phase = 'running', key = 'we', saved_at = 0, block_id = 'gone', fence_v = 1, attempt = ROOT .. '/f1/we'}
+  local s = fence_sandbox(c, {processes = {PLUGIN, wrapper_line('we')}})
+  s:tick()
+  expect(record(s).phase, 'the wrapper runs').to_be('running')
+  s.processes = {PLUGIN, DOWN}
+  s:tick()
+  expect(record(s).phase, 'a down child runs').to_be('running')
+  expect(#s.calls, 'no new attempt while one runs').to_be(0)
+  -- Nothing runs: retry, and a new attempt (a later timer of the same tick can already send it).
+  s.processes = {PLUGIN}
+  s:tick()
+  s:tick()
+  expect(#s.calls, 'a new attempt').to_be(1)
+  assert_true(record(s).key ~= 'we', 'with a new key')
 end)
 
 test('a wrapper that ended without a receipt fails its attempt only when no down child runs (sandbox)', function()
@@ -328,7 +325,10 @@ end)
 
 test('a missing plugin session starts no new attempt (sandbox)', function()
   for _, phase in ipairs({'new', 'retry'}) do
-    local s = fence_sandbox({phase = phase, retry_at = 0}, {rex = NO_SESSION})
+    -- A retry record keeps the fence of its last attempt; a new record has none yet.
+    local c = {phase = phase, retry_at = 0}
+    if phase == 'retry' then c.key, c.fence_v, c.attempt = 'gr', 1, ROOT .. '/f1/gr' end
+    local s = fence_sandbox(c, {rex = NO_SESSION})
     s:tick()
     expect(#s.calls, phase .. ': no create').to_be(0)
     for _, argv in ipairs(s.execs) do assert_true(argv[1] ~= '/bin/mkdir', phase .. ': no attempt directory') end
@@ -337,11 +337,11 @@ test('a missing plugin session starts no new attempt (sandbox)', function()
 end)
 
 test('a missing plugin session keeps a running or a closing record as it is (sandbox)', function()
-  local running = fence_sandbox({phase = 'running', key = 'ge', saved_at = 0, block_id = 'b'}, {rex = NO_SESSION})
+  local running = fence_sandbox({phase = 'running', key = 'ge', saved_at = 0, block_id = 'b', fence_v = 1, attempt = ROOT .. '/f1/ge'}, {rex = NO_SESSION})
   running:tick()
   expect(record(running).phase).to_be('running')
   expect(record(running).block_id).to_be('b')
-  local closing = fence_sandbox({phase = 'closing', key = 'gf', saved_at = 0, block_id = 'b', result = {ok = true}}, {rex = NO_SESSION})
+  local closing = fence_sandbox({phase = 'closing', key = 'gf', saved_at = 0, block_id = 'b', result = {ok = true}, fence_v = 1, attempt = ROOT .. '/f1/gf'}, {rex = NO_SESSION})
   closing:tick()
   expect(record(closing).phase).to_be('closing')
 end)

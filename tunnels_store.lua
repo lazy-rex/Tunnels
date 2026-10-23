@@ -24,10 +24,11 @@ M.KINDS = {
   {field = 'intents', key = 'id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'creator', 'fingerprint', 'created', 'saved_at', 'phase'}, json = {creator = true}, check = CREATOR},
   {field = 'forwards', key = 'block_id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'op', 'created', 'creator', 'url'}, json = {creator = true}, check = CREATOR},
   {field = 'stops', key = 'id', columns = {'forward', 'session_id', 'port', 'profile', 'fingerprint', 'saved_at'}},
-  -- A sending cleanup is always fenced (decision "Cleanup attempt fence"): its create result can be
-  -- unknown, and only the claim of its attempt proves that it can never run down.
+  -- A cleanup after new is always fenced (decision "Cleanup attempt fence"): sending saves fence_v
+  -- and attempt, and running, closing and retry keep them. Only the claim of its attempt proves that
+  -- an attempt with an unknown create result can never run down.
   {field = 'cleanups', key = 'profile', columns = {'phase', 'key', 'block_id', 'result', 'retry_at', 'saved_at', 'attempt', 'fence_v'}, json = {result = true},
-    check = "phase IS NOT 'sending' OR (fence_v IS 1 AND attempt IS NOT NULL)"},
+    check = "phase IS 'new' OR (fence_v IS 1 AND attempt IS NOT NULL)"},
 }
 local INTEGER = {port = true, saved_at = true, retry_at = true, fence_v = true}
 M.FIELD = {} -- the catalog fields of the kinds
@@ -199,9 +200,9 @@ function M.open(app)
   -- - An operation whose fingerprint has the v1 Forward format ("forward/"): the coordinator decided
   --   to drop it (coord-tunnels-v1-op: its session is gone; no live caller can retry it). The import
   --   prints one line for each.
-  -- - A cleanup in phase "sending" with no fence_v (an attempt of a plugin without the fence): it
-  --   fails the import, because nothing proves that its old script can never run down. (The cleanups
-  --   table refuses such a row too; this check names the profile.)
+  -- - A cleanup after phase new with no fence (fence_v 1 and an attempt; an attempt of a plugin
+  --   without the fence): it fails the import, because nothing proves that its old script can never
+  --   run down. (The cleanups table refuses such a row too; this check names the profile and phase.)
   -- - An intent whose fingerprint has the v1 Forward format: it fails the import. The intent is an
   --   active reservation, not a saved result, so coord-tunnels-v1-op does not apply. Maintenance
   --   could adopt it and save a new v1 result that a retry can never match.
@@ -239,8 +240,8 @@ function M.open(app)
       end
     end
     for profile, c in pairs(state.cleanups) do
-      if type(c) == 'table' and c.phase == 'sending' and c.fence_v == nil then
-        fail('conflict', 'The import refuses the cleanup of ' .. tostring(profile) .. ': it is sending with no fence')
+      if type(c) == 'table' and c.phase ~= 'new' and not (c.fence_v == 1 and type(c.attempt) == 'string') then
+        fail('conflict', 'The import refuses the cleanup of ' .. tostring(profile) .. ': it is ' .. tostring(c.phase) .. ' with no fence')
       end
     end
     for field in pairs(value) do

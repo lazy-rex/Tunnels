@@ -131,6 +131,27 @@ test('a NULL fence_v does not pass the cleanups CHECK, on INSERT or on the UPDAT
   sql_write("DELETE FROM cleanups WHERE profile = 'ck-6'")
 end)
 
+test('a running, closing or retry row needs the fence too, on INSERT and on the UPDATE from new; a new row needs none (lab)', function()
+  for _, phase in ipairs({'running', 'closing', 'retry'}) do
+    for name, cols in pairs({
+      ['no fence'] = "(profile, phase, key) VALUES ('cf-1', '" .. phase .. "', 'k')",
+      ['NULL fence, an attempt'] = "(profile, phase, key, fence_v, attempt) VALUES ('cf-1', '" .. phase .. "', 'k', NULL, '/a')",
+      ['a fence, no attempt'] = "(profile, phase, key, fence_v) VALUES ('cf-1', '" .. phase .. "', 'k', 1)",
+    }) do
+      expect_error(function() sql_write('INSERT INTO cleanups ' .. cols) end, 'CHECK')
+      expect(sql("SELECT profile FROM cleanups WHERE profile = 'cf-1'")[1], phase .. ', ' .. name .. ': no row').to_be(nil)
+    end
+    -- The plugin is idle (no state, no open view), so it does not act on the new row; the UPDATE sets
+    -- fence_v to NULL itself, so a fence from maintenance cannot hide the rule.
+    sql_write("INSERT INTO cleanups (profile, phase) VALUES ('cf-2', 'new')")
+    expect_error(function() sql_write("UPDATE cleanups SET phase = ?1, key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'cf-2'", {phase}) end, 'CHECK')
+    expect(sql("SELECT phase FROM cleanups WHERE profile = 'cf-2'")[1].phase, phase .. ': the row stays new').to_be('new')
+    sql_write("DELETE FROM cleanups WHERE profile = 'cf-2'")
+    sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('cf-3', ?1, 'k', 1, '/nonexistent/k')", {phase})
+    sql_write("DELETE FROM cleanups WHERE profile = 'cf-3'")
+  end
+end)
+
 test('the intents and forwards tables refuse a creator that is not a user or an agent with an ID (lab)', function()
   local bad = {
     ['SQL NULL'] = {null = true}, ['JSON null'] = 'null', ['a JSON string'] = '"x"', ['a JSON array'] = '[1]',

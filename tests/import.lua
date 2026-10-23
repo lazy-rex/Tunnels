@@ -79,10 +79,20 @@ test('the import copies the record and every saved operation, and drops only the
   assert_true(table.concat(meta, '\n'):find('writes', 1, true) == nil, 'writes stays 0')
 end)
 
-test('the import refuses a sending cleanup with no fence, and an unknown field; it writes nothing (fixture)', function()
-  local f = fixture({cleanups = {['lazyrex-1'] = {phase = 'sending', key = 'k', saved_at = 7}}}, {})
-  expect(f.error and f.error.code).to_be('conflict')
-  expect(#f.execs, 'nothing is written').to_be(0)
+test('the import refuses a cleanup after new with no fence, and an unknown field; it writes nothing (fixture)', function()
+  for _, phase in ipairs({'sending', 'running', 'closing', 'retry'}) do
+    for name, extra in pairs({['no fence'] = {}, ['no attempt'] = {fence_v = 1}, ['no fence_v'] = {attempt = '/a'}}) do
+      local c = {phase = phase, key = 'k', saved_at = 7}
+      for k, v in pairs(extra) do c[k] = v end
+      local f = fixture({cleanups = {['lazyrex-1'] = c}}, {})
+      expect(f.error and f.error.code, phase .. ', ' .. name).to_be('conflict')
+      expect(f.error.message, phase .. ', ' .. name).to_match('lazyrex%-1: it is ' .. phase .. ' with no fence')
+      expect(#f.execs, phase .. ', ' .. name .. ': nothing is written').to_be(0)
+    end
+  end
+  -- A new record has no fence yet: the import takes it.
+  local f = fixture({cleanups = {['lazyrex-1'] = {phase = 'new'}}}, {})
+  expect(f.error, 'a new record').to_be(nil)
   f = fixture({forwards = {b1 = {port = 1, creator = {kind = 'user'}, colour = 'red'}}}, {})
   expect(f.error and f.error.code).to_be('internal')
   expect(f.error.message).to_match('colour')
