@@ -6,7 +6,8 @@
 --     rex = {[method] = function(args) return result, err end}})
 -- It answers the stub state: the event handlers, the last reply, the new_block calls, the saved
 -- catalog, the saved operation records (ops), and loaded / load_error. s:perform(action, args) sends a hub request to the plugin and answers the reply.
--- s:tick() runs the timers that the plugin set.
+-- s:tick() runs the timers that the plugin set. The SDK registration timer has run at load, so the
+-- plugin is registered before a test sends a request, as on the hub. os.exit sets s.exited.
 -- s.fs is a small file system in memory for the cleanup fence: path -> {dir = true}, {link = target}
 -- or {data = text}. The stub answers /bin/test -d, /bin/mkdir [-p], /bin/ln -s, /usr/bin/readlink
 -- and /bin/cat from it. opts.fs gives the start state; opts.exec(argv) answers a call first, when it
@@ -101,6 +102,9 @@ return function(plugin_dir, base, opts)
           if args.args.op then s.ops[args.args.op.key] = args.args.op end
           return {result = {revs = {forwards = tostring(s.rev)}}}
         end
+        -- The limits that the hub sends (hub/cmd/hub/replyparts.go, partsLimits, hub main cd53575): the
+        -- SDK takes them from the hub.register reply and fails its start without them.
+        if args.action == 'hub.register' then return {result = {generation = '1', limits = {inline_max = 45056, part_bytes = 57344, max_total = 786432}}} end
         if args.action == 'hub.identify' then return {result = {found = true, agent = 'alice', session_id = 's'}} end
         return {result = {}}
       end
@@ -112,7 +116,7 @@ return function(plugin_dir, base, opts)
       return {}
     end,
   }
-  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end}, {__index = os})}, {__index = base})
+  local env = setmetatable({rex = stub, os = setmetatable({getenv = function(name) return vars[name] end, exit = function(code) s.exited = code end}, {__index = os})}, {__index = base})
   -- The LazyRex SDK, loaded fresh with the stub rex (its state is per plugin): sdk/lua of the LazyRex
   -- checkout that runs the tests (H.args.sdk, else beside H.args.lib = <checkout>/lab/test).
   local args = base.H and base.H.args or {}
@@ -125,6 +129,9 @@ return function(plugin_dir, base, opts)
   local chunk = assert(loadfile(plugin_dir .. '/tunnels.lua'))
   setfenv(chunk, env)
   s.loaded, s.load_error = pcall(chunk)
+  -- The SDK sets its registration timer first, in require('lazyrex').plugin() at the top of tunnels.lua:
+  -- run only that one now. The plugin's own timers wait for s:tick(), as before.
+  if s.loaded and s.timers[1] then table.remove(s.timers, 1)() end
   function s:perform(action, args)
     self.reply = nil
     self.handlers.client_perform_requested({}, {requester = {client_id = 'hub'}, action = action, call_id = 'c', args = args})
