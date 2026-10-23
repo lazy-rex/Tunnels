@@ -18,7 +18,7 @@ local function seed(p)
   T.edit(function(value)
     value.forwards = value.forwards or {}
     value.forwards[b] = {session_id = S, source_block = pane.block, port = p, target = '127.0.0.1:' .. p, profile = T.prefix .. p,
-    op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = {kind = 'agent', agent = 'alice'}}
+    op = 'seed-' .. p, created = os.date('!%Y-%m-%dT%H:%M:%SZ'), creator = {kind = 'agent', agent = alice.id}}
   end)
   return b
 end

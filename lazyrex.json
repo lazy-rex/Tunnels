@@ -4,16 +4,6 @@
  "sdk": "0",
  "events": "all",
  "test": {
-  "agents": [
-   {
-    "id": "alice",
-    "name": "Alice"
-   },
-   {
-    "id": "bob",
-    "name": "Bob"
-   }
-  ],
   "env": {
    "LAZYREX_TUNNELS_OPENTUNNEL": "${PLUGIN}/tests/fake-opentunnel.sh",
    "FAKE_OT_DIR": "${LAB}/fake-ot",

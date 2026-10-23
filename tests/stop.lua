@@ -106,8 +106,8 @@ end)
 
 test('an agent stops an agent forward; the key replays; another forward with the key conflicts', function()
   local p1, p2, p3 = port(), port(), port()
-  local f1, f2, f3 = seed(p1, 'bob'), seed(p2, 'alice'), seed(p3, 'alice')
-  expect(listed(f1).created_by).to_be('bob')
+  local f1, f2, f3 = seed(p1, bob.id), seed(p2, alice.id), seed(p3, alice.id)
+  expect(listed(f1).created_by).to_be(bob.id)
   local r = alice:call('tunnels.stop', {forward = f1, key = 'k1'})
   expect(r).to_equal({forward = f1, stopped = true})
   expect(blocks()[f1]).to_be(nil)
@@ -123,7 +123,7 @@ test('an agent stops an agent forward; the key replays; another forward with the
   local op = v:action('fw/' .. f3, 'stop', {item_id = 'stop'}, 'view-stop-1')
   expect(op.status).to_be('succeeded')
   local p4 = port()
-  local f4 = seed(p4, 'alice')
+  local f4 = seed(p4, alice.id)
   v:render()
   -- The hub refuses the changed arguments at admission (view_ops); the plugin is not called.
   expect_error(function() v:action('fw/' .. f4, 'stop', {item_id = 'stop'}, 'view-stop-1') end, 'operation_conflict')
@@ -134,7 +134,7 @@ end)
 
 test('a failed intent save closes no block', function()
   local p = port()
-  local f = seed(p, 'alice')
+  local f = seed(p, alice.id)
   quiet()
   with_injection({match = {sql_commit_writes = 'stops'}, fail = 'lost connection', times = 1}, 1, function()
     expect_error(function() alice:call('tunnels.stop', {forward = f, key = 'save-fails'}) end, 'lost connection')
@@ -148,15 +148,15 @@ end)
 
 test('a failed final batch: maintenance finishes the stop; the key replays after the port is reused', function()
   local p = port()
-  local f = seed(p, 'alice')
-  with_injection({match = {sql_commit_writes = 'ops', sql_param = stop_key('alice', 'final-fails')}, fail = 'lost connection', times = 1}, 1, function()
+  local f = seed(p, alice.id)
+  with_injection({match = {sql_commit_writes = 'ops', sql_param = stop_key(alice.id, 'final-fails')}, fail = 'lost connection', times = 1}, 1, function()
     expect_error(function() alice:call('tunnels.stop', {forward = f, key = 'final-fails'}) end, 'lost connection')
   end)
   expect(blocks()[f]).to_be(nil)
   wait('maintenance finishes the stop', function() return next(catalog().stops or {}) == nil end, 15)
   no_cleanup_for(p)
   -- The port is forwarded again; the old key replays and leaves the new forward alone.
-  local again = seed(p, 'alice')
+  local again = seed(p, alice.id)
   expect(alice:call('tunnels.stop', {forward = f, key = 'final-fails'})).to_equal({forward = f, stopped = true})
   assert_true(blocks()[again], 'the new forward still runs')
   expect(listed(again).port).to_be(p)
@@ -171,17 +171,17 @@ local function tunnel_count() local n = 0; for _, b in pairs(blocks()) do if (b.
 
 test('two saved stops of one forward both finish through the plugin; one cleanup; both keys replay after reuse', function()
   local p = port()
-  local f = seed(p, 'alice')
+  local f = seed(p, alice.id)
   T.edit(function(value)
     value.stops = value.stops or {}
-    value.stops[stop_key('alice', 'both-a')] = saved_stop(f, p)
-    value.stops[stop_key('bob', 'both-b')] = saved_stop(f, p)
+    value.stops[stop_key(alice.id, 'both-a')] = saved_stop(f, p)
+    value.stops[stop_key(bob.id, 'both-b')] = saved_stop(f, p)
   end)
   panel() -- a render kicks maintenance
   wait('both stops finish', function() return next(catalog().stops or {}) == nil end, 15)
   expect(blocks()[f]).to_be(nil)
   no_cleanup_for(p)
-  local again = seed(p, 'alice')
+  local again = seed(p, alice.id)
   rex.sleep(2) -- maintenance runs every second while work remains
   expect(alice:call('tunnels.stop', {forward = f, key = 'both-a'})).to_equal({forward = f, stopped = true})
   expect(bob:call('tunnels.stop', {forward = f, key = 'both-b'})).to_equal({forward = f, stopped = true})
@@ -194,8 +194,8 @@ end)
 
 test('a stop that finishes after another keeps the port reserved and adds no second cleanup', function()
   local p = port()
-  local f = seed(p, 'alice')
-  local ka, kb = stop_key('alice', 'held-a'), stop_key('bob', 'held-b')
+  local f = seed(p, alice.id)
+  local ka, kb = stop_key(alice.id, 'held-a'), stop_key(bob.id, 'held-b')
   -- Bob's final batch fails ten times (one per maintenance pass, about one per second), so his
   -- saved stop outlives Alice's; then it finishes through finish_stop with the forward gone.
   inject({match = {sql_commit_writes = 'ops', sql_param = kb}, fail = 'held', times = 10})
@@ -226,11 +226,11 @@ end)
 
 test('a saved stop resumes after a plugin restart and replays', function()
   local p = port()
-  local f = seed(p, 'alice')
+  local f = seed(p, alice.id)
   H.hub('hub.admin.stop', {plugin = 'tunnels'})
   T.edit(function(value)
     value.stops = value.stops or {}
-    value.stops[stop_key('alice', 'restart')] = saved_stop(f, p)
+    value.stops[stop_key(alice.id, 'restart')] = saved_stop(f, p)
   end)
   H.hub('hub.admin.start', {plugin = 'tunnels'})
   wait('the restarted plugin finishes the stop', function() return next(catalog().stops or {}) == nil end, 30)
@@ -244,7 +244,7 @@ test('T.edit keeps a plugin commit that comes between its read and its write', f
   -- no row, and T.edit applies its change again on the fresh state. A plain write would put the
   -- stopped forward back.
   local p = port()
-  local f = seed(p, 'alice')
+  local f = seed(p, alice.id)
   -- The count is a table field: Rex Lua detaches a local that a closure captured before a caught
   -- error (LazyRex docs/rex-protocol.md, "Rex Lua runtime"), so a plain local can read stale here.
   local calls = {n = 0}

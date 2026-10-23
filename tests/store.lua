@@ -183,7 +183,7 @@ test('an operation result and the write counter commit with the change, or not a
   local p = T.port()
   local r = alice:call('tunnels.forward', {key = 'store-' .. p, port = p, session_id = S, block_id = pane.block})
   wait('no work in progress', function() local c = T.catalog(); return not next(c.cleanups) and not next(c.stops) and not next(c.intents) end, 30)
-  local key = 'stop/' .. part('agent') .. part('alice') .. part('store-stop-' .. p)
+  local key = 'stop/' .. part('agent') .. part(alice.id) .. part('store-stop-' .. p)
   local w0 = writes()
   -- The final write of the stop (the forward goes, the op is saved) fails until the injection goes.
   local held = inject{match = {sql_commit_writes = 'ops', sql_param = key}, fail = 'held', times = 'always'}
