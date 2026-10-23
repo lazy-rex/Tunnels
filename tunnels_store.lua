@@ -12,7 +12,8 @@ local M = {}
 
 -- KINDS: the catalog field (also the table name), its key column and its columns. json columns hold
 -- a Lua table as JSON text; the other columns hold a string or a number. check: a row rule that SQL
--- enforces for every writer.
+-- enforces for every writer. A CHECK accepts a NULL result, so it uses IS (NULL IS 1 is false; NULL = 1
+-- is NULL).
 M.KINDS = {
   {field = 'intents', key = 'id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'creator', 'fingerprint', 'created', 'saved_at', 'phase'}, json = {creator = true}},
   {field = 'forwards', key = 'block_id', columns = {'session_id', 'source_block', 'port', 'target', 'profile', 'op', 'created', 'creator', 'url'}, json = {creator = true}},
@@ -20,7 +21,7 @@ M.KINDS = {
   -- A sending cleanup is always fenced (decision "Cleanup attempt fence"): its create result can be
   -- unknown, and only the claim of its attempt proves that it can never run down.
   {field = 'cleanups', key = 'profile', columns = {'phase', 'key', 'block_id', 'result', 'retry_at', 'saved_at', 'attempt', 'fence_v'}, json = {result = true},
-    check = "phase <> 'sending' OR (fence_v = 1 AND attempt IS NOT NULL)"},
+    check = "phase IS NOT 'sending' OR (fence_v IS 1 AND attempt IS NOT NULL)"},
 }
 local INTEGER = {port = true, saved_at = true, retry_at = true, fence_v = true}
 M.FIELD = {} -- the catalog fields of the kinds

@@ -119,6 +119,18 @@ test('the cleanups table refuses a sending row without fence_v = 1 and an attemp
   sql_write("DELETE FROM cleanups WHERE profile = 'ck-4'")
 end)
 
+test('a NULL fence_v does not pass the cleanups CHECK, on INSERT or on the UPDATE to sending (lab)', function()
+  -- In SQL, NULL = 1 is NULL, and a CHECK accepts NULL: the rule must be false for a missing fence.
+  expect_error(function() sql_write("INSERT INTO cleanups (profile, phase, key, attempt) VALUES ('ck-5', 'sending', 'k', '/a')") end, 'CHECK')
+  expect(sql("SELECT profile FROM cleanups WHERE profile = 'ck-5'")[1], 'no sending row with a NULL fence').to_be(nil)
+  -- A new record has no fence yet. The plugin is idle (no state, no open view, so no maintenance
+  -- timer), and the UPDATE sets fence_v to NULL itself, so a fence from maintenance cannot hide the rule.
+  sql_write("INSERT INTO cleanups (profile, phase) VALUES ('ck-6', 'new')")
+  expect_error(function() sql_write("UPDATE cleanups SET phase = 'sending', key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'ck-6'") end, 'CHECK')
+  expect(sql("SELECT phase FROM cleanups WHERE profile = 'ck-6'")[1].phase, 'the row stays new').to_be('new')
+  sql_write("DELETE FROM cleanups WHERE profile = 'ck-6'")
+end)
+
 local function writes() return sql("SELECT value FROM meta WHERE name = 'writes'")[1].value end
 local function part(v) v = tostring(v); return #v .. ':' .. v .. '/' end
 test('an operation result and the write counter commit with the change, or not at all (lab)', function()
