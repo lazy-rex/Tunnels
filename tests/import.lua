@@ -159,9 +159,9 @@ test('a start imports the hub.store data into SQL; a v1 Forward operation is dro
   put_operation{key = 'imp-stop', fingerprint = 'stop-v1/b', result = {forward = 'block:x', stopped = true}}
   put_operation{key = 'imp-v1', fingerprint = 'forward/5:other/4:9999/' .. S, result = {panel = {command = 'tunnels'}}}
   -- Empty tables and no import mark, as at the first start on SQL.
-  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do sql_write('DELETE FROM ' .. t) end
-  sql_write("DELETE FROM meta WHERE name IN ('import', 'fence')")
-  sql_write("UPDATE meta SET value = 0 WHERE name = 'writes'")
+  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do T.sql_write('DELETE FROM ' .. t) end
+  T.sql_write("DELETE FROM meta WHERE name IN ('import', 'fence')")
+  T.sql_write("UPDATE meta SET value = 0 WHERE name = 'writes'")
   H.hub('hub.admin.start', {plugin = 'tunnels'})
   wait('the import is done', function() return sql("SELECT value FROM meta WHERE name = 'import'")[1] ~= nil end, 20)
   local c = T.catalog()
@@ -187,9 +187,9 @@ test('a failed import commits nothing; the next start imports once, with the sav
   H.hub('hub.admin.stop', {plugin = 'tunnels'})
   write({{key = 'forwards', value = {forwards = {[pane.block] = fw}, intents = {}, cleanups = {}, stops = {}}}})
   for key, op in pairs(saved) do put_operation{key = key, fingerprint = op.fingerprint, result = op.result} end
-  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do sql_write('DELETE FROM ' .. t) end
-  sql_write("DELETE FROM meta WHERE name IN ('import', 'fence')")
-  sql_write("UPDATE meta SET value = 0 WHERE name = 'writes'")
+  for _, t in ipairs({'intents', 'forwards', 'stops', 'cleanups', 'ops'}) do T.sql_write('DELETE FROM ' .. t) end
+  T.sql_write("DELETE FROM meta WHERE name IN ('import', 'fence')")
+  T.sql_write("UPDATE meta SET value = 0 WHERE name = 'writes'")
   -- The import commit (it writes the rows, the ops and the mark) fails. The schema stays from the migration.
   local held = inject{match = {sql_commit_writes = 'meta'}, fail = 'the import fails', times = 'always'}
   local _, base = calls('none')

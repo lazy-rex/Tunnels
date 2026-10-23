@@ -89,15 +89,15 @@ test('every kind, a missing optional field, nested JSON and the fence round-trip
       local names, values = M.values_of(k, key, record, rex.json.encode, function(_, m) error(m, 0) end)
       local marks, params = {}, {}
       for i = 1, #names do marks[i], params[i] = '?' .. i, values[i] == nil and {null = true} or values[i] end
-      sql_write('INSERT INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', params)
+      T.sql_write('INSERT INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', params)
     end
   end
-  sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', '/rt/fence')")
+  T.sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', '/rt/fence')")
   local got = T.catalog()
   for _, k in ipairs(M.KINDS) do
-    for key in pairs(c[k.field]) do sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1', {key}) end
+    for key in pairs(c[k.field]) do T.sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1', {key}) end
   end
-  sql_write("DELETE FROM meta WHERE name = 'fence'")
+  T.sql_write("DELETE FROM meta WHERE name = 'fence'")
   for _, kind in ipairs({'intents', 'forwards', 'stops', 'cleanups'}) do expect(got[kind], kind).to_equal(c[kind]) end
   expect(got.fence).to_be('/rt/fence')
   -- A missing optional field is nil, not a JSON null sentinel.
@@ -111,24 +111,24 @@ test('the cleanups table refuses a sending row without fence_v = 1 and an attemp
     ['no attempt'] = {"INSERT INTO cleanups (profile, phase, key, fence_v) VALUES ('ck-2', 'sending', 'k', 1)"},
     ['fence 2'] = {"INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('ck-3', 'sending', 'k', 2, '/a')"},
   }) do
-    expect_error(function() sql_write(row[1]) end, 'CHECK')
+    expect_error(function() T.sql_write(row[1]) end, 'CHECK')
     expect(sql("SELECT profile FROM cleanups WHERE profile LIKE 'ck-%'")[1], name .. ': no row').to_be(nil)
   end
   -- The plugin is idle (no state), and the row goes before the next maintenance pass can claim it.
-  sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('ck-4', 'sending', 'k', 1, '/nonexistent/k')")
-  sql_write("DELETE FROM cleanups WHERE profile = 'ck-4'")
+  T.sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('ck-4', 'sending', 'k', 1, '/nonexistent/k')")
+  T.sql_write("DELETE FROM cleanups WHERE profile = 'ck-4'")
 end)
 
 test('a NULL fence_v does not pass the cleanups CHECK, on INSERT or on the UPDATE to sending (lab)', function()
   -- In SQL, NULL = 1 is NULL, and a CHECK accepts NULL: the rule must be false for a missing fence.
-  expect_error(function() sql_write("INSERT INTO cleanups (profile, phase, key, attempt) VALUES ('ck-5', 'sending', 'k', '/a')") end, 'CHECK')
+  expect_error(function() T.sql_write("INSERT INTO cleanups (profile, phase, key, attempt) VALUES ('ck-5', 'sending', 'k', '/a')") end, 'CHECK')
   expect(sql("SELECT profile FROM cleanups WHERE profile = 'ck-5'")[1], 'no sending row with a NULL fence').to_be(nil)
   -- A new record has no fence yet. The plugin is idle (no state, no open view, so no maintenance
   -- timer), and the UPDATE sets fence_v to NULL itself, so a fence from maintenance cannot hide the rule.
-  sql_write("INSERT INTO cleanups (profile, phase) VALUES ('ck-6', 'new')")
-  expect_error(function() sql_write("UPDATE cleanups SET phase = 'sending', key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'ck-6'") end, 'CHECK')
+  T.sql_write("INSERT INTO cleanups (profile, phase) VALUES ('ck-6', 'new')")
+  expect_error(function() T.sql_write("UPDATE cleanups SET phase = 'sending', key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'ck-6'") end, 'CHECK')
   expect(sql("SELECT phase FROM cleanups WHERE profile = 'ck-6'")[1].phase, 'the row stays new').to_be('new')
-  sql_write("DELETE FROM cleanups WHERE profile = 'ck-6'")
+  T.sql_write("DELETE FROM cleanups WHERE profile = 'ck-6'")
 end)
 
 test('a running, closing or retry row needs the fence too, on INSERT and on the UPDATE from new; a new row needs none (lab)', function()
@@ -138,17 +138,17 @@ test('a running, closing or retry row needs the fence too, on INSERT and on the 
       ['NULL fence, an attempt'] = "(profile, phase, key, fence_v, attempt) VALUES ('cf-1', '" .. phase .. "', 'k', NULL, '/a')",
       ['a fence, no attempt'] = "(profile, phase, key, fence_v) VALUES ('cf-1', '" .. phase .. "', 'k', 1)",
     }) do
-      expect_error(function() sql_write('INSERT INTO cleanups ' .. cols) end, 'CHECK')
+      expect_error(function() T.sql_write('INSERT INTO cleanups ' .. cols) end, 'CHECK')
       expect(sql("SELECT profile FROM cleanups WHERE profile = 'cf-1'")[1], phase .. ', ' .. name .. ': no row').to_be(nil)
     end
     -- The plugin is idle (no state, no open view), so it does not act on the new row; the UPDATE sets
     -- fence_v to NULL itself, so a fence from maintenance cannot hide the rule.
-    sql_write("INSERT INTO cleanups (profile, phase) VALUES ('cf-2', 'new')")
-    expect_error(function() sql_write("UPDATE cleanups SET phase = ?1, key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'cf-2'", {phase}) end, 'CHECK')
+    T.sql_write("INSERT INTO cleanups (profile, phase) VALUES ('cf-2', 'new')")
+    expect_error(function() T.sql_write("UPDATE cleanups SET phase = ?1, key = 'k', attempt = '/a', fence_v = NULL WHERE profile = 'cf-2'", {phase}) end, 'CHECK')
     expect(sql("SELECT phase FROM cleanups WHERE profile = 'cf-2'")[1].phase, phase .. ': the row stays new').to_be('new')
-    sql_write("DELETE FROM cleanups WHERE profile = 'cf-2'")
-    sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('cf-3', ?1, 'k', 1, '/nonexistent/k')", {phase})
-    sql_write("DELETE FROM cleanups WHERE profile = 'cf-3'")
+    T.sql_write("DELETE FROM cleanups WHERE profile = 'cf-2'")
+    T.sql_write("INSERT INTO cleanups (profile, phase, key, fence_v, attempt) VALUES ('cf-3', ?1, 'k', 1, '/nonexistent/k')", {phase})
+    T.sql_write("DELETE FROM cleanups WHERE profile = 'cf-3'")
   end
 end)
 
@@ -162,12 +162,12 @@ test('the intents and forwards tables refuse a creator that is not a user or an 
   -- The plugin is idle (no state, no open view), and each good row goes before maintenance can act.
   for _, t in ipairs({{name = 'intents', key = 'id'}, {name = 'forwards', key = 'block_id'}}) do
     for name, creator in pairs(bad) do
-      expect_error(function() sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-x', creator}) end, 'CHECK')
+      expect_error(function() T.sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-x', creator}) end, 'CHECK')
       expect(sql('SELECT creator FROM ' .. t.name .. ' WHERE ' .. t.key .. " = 'cr-x'")[1], t.name .. ', ' .. name .. ': no row').to_be(nil)
     end
     for i, creator in ipairs({'{"kind":"user"}', '{"kind":"agent","agent":"alice"}'}) do
-      sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-ok' .. i, creator})
-      sql_write('DELETE FROM ' .. t.name .. ' WHERE ' .. t.key .. ' = ?1', {'cr-ok' .. i})
+      T.sql_write('INSERT INTO ' .. t.name .. ' (' .. t.key .. ', creator) VALUES (?1, ?2)', {'cr-ok' .. i, creator})
+      T.sql_write('DELETE FROM ' .. t.name .. ' WHERE ' .. t.key .. ' = ?1', {'cr-ok' .. i})
     end
   end
 end)

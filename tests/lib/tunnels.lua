@@ -78,6 +78,19 @@ return function(E, tests_dir)
     return r
   end
   local function read() return store.state_of(E.sql(store.CATALOG), rex.json.decode) end
+  -- T.sql_write is the harness sql_write that tries again while the plugin has an open transaction.
+  -- The harness refuses such a write with busy before it begins (LazyRex docs/testing.md), so the
+  -- write did not run. The plugin's maintenance transaction ends within a second; after 10 s the
+  -- busy error is raised. Any other error is raised at once (a CHECK refusal, for example).
+  function T.sql_write(sql, params)
+    for _ = 1, 100 do
+      local ok, r = pcall(E.sql_write, sql, params)
+      if ok then return r end
+      if not tostring(r):find('busy: the plugin has an open transaction', 1, true) then error(r, 0) end
+      rex.sleep(0.1)
+    end
+    return E.sql_write(sql, params)
+  end
   function T.catalog() return (read()) end
   -- put writes one changed row of kind k as another writer, only if the row is still as it was read
   -- (raw: its JSON text; nil for a new row). It answers false when another commit changed the row.
@@ -88,12 +101,12 @@ return function(E, tests_dir)
     if raw == nil then
       local marks = {}
       for i = 1, #names do marks[i] = '?' .. i end
-      return (pcall(E.sql_write, 'INSERT INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', params))
+      return (pcall(T.sql_write, 'INSERT INTO ' .. k.field .. ' (' .. table.concat(names, ', ') .. ') VALUES (' .. table.concat(marks, ', ') .. ')', params))
     end
     local sets = {}
     for i = 2, #names do sets[#sets + 1] = names[i] .. ' = ?' .. i end
     params[#names + 1] = raw
-    return E.sql_write('UPDATE ' .. k.field .. ' SET ' .. table.concat(sets, ', ') .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?' .. (#names + 1), params).changes == 1
+    return T.sql_write('UPDATE ' .. k.field .. ' SET ' .. table.concat(sets, ', ') .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?' .. (#names + 1), params).changes == 1
   end
   -- edit changes the state as another writer: it reads the catalog, calls f(value), and writes each
   -- changed row only if that row is still as it was read. A plugin commit in between that changed
@@ -116,15 +129,15 @@ return function(E, tests_dir)
       for _, k in ipairs(store.KINDS) do
         local old, new = before[k.field], value[k.field] or {}
         for key in pairs(old) do
-          if new[key] == nil and E.sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?2', {key, raw[k.field][key]}).changes ~= 1 then done = false end
+          if new[key] == nil and T.sql_write('DELETE FROM ' .. k.field .. ' WHERE ' .. k.key .. ' = ?1 AND ' .. store.row_json(k) .. ' = ?2', {key, raw[k.field][key]}).changes ~= 1 then done = false end
         end
         for key, record in pairs(new) do
           if not same(old[key], record) and not put(k, key, record, raw[k.field][key]) then done = false end
         end
       end
       if value.fence ~= before.fence then
-        if value.fence == nil then E.sql_write("DELETE FROM meta WHERE name = 'fence'")
-        else E.sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', ?1)", {value.fence}) end
+        if value.fence == nil then T.sql_write("DELETE FROM meta WHERE name = 'fence'")
+        else T.sql_write("INSERT OR REPLACE INTO meta (name, value) VALUES ('fence', ?1)", {value.fence}) end
       end
       if done then return value end
     end
@@ -132,7 +145,7 @@ return function(E, tests_dir)
   end
   -- put_operation saves an operation result in the ops table directly: {key, fingerprint, result}.
   function T.put_operation(op)
-    E.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', {op.key, op.fingerprint, rex.json.encode(op.result)})
+    T.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?1, ?2, ?3)', {op.key, op.fingerprint, rex.json.encode(op.result)})
   end
   function T.cleanups() local c = {}; for profile in pairs(T.catalog().cleanups or {}) do c[#c + 1] = profile end; table.sort(c); return c end
   function T.blocks(session)
