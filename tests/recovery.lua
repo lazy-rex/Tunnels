@@ -162,7 +162,7 @@ test('an exited block with the label of a cleanup attempt is no proof: the profi
 end)
 
 test('a cleanup attempt whose running write was lost is proven and finished, after its down ran', function()
-  -- Lab evidence (reviewer lab /tmp/lrt-3109559289): the record stayed 'sending' after the down of
+  -- Lab evidence (a lab run): the record stayed 'sending' after the down of
   -- its attempt ran, because the down process had exited and no proof was possible. The run script
   -- now waits after down with a receipt, so the attempt stays provable.
   local p = T.port()

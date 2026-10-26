@@ -78,7 +78,7 @@ end
 local hub, rex_ok = app.hub, app.rex
 local function message(err) return type(err) == 'table' and (err.message or err.code) or tostring(err) end
 
--- Port discovery is Codex's module. The form scans once per session and keeps the result until
+-- Port discovery is in tunnels_ports.lua. The form scans once per session and keeps the result until
 -- the user asks for a rescan, so an unrelated render does not run ps and lsof again.
 local scans = {}
 local function scan(session_id)
