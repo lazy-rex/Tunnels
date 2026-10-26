@@ -1,9 +1,10 @@
-<!-- Research by Codex, 2026-10-15. Read-only: nothing installed or run. -->
+<!-- Read-only research: nothing installed or run. -->
 
 # OpenTunnel research for LazyRex
 
-Research date: 2026-10-15, America/Los_Angeles (2026-10-16 UTC).
+Research date: 2026-10-16 (UTC).
 Scope: `anomalyco/opentunnel`, not similarly named projects.
+The research names a LazyRex PWA and a Go gateway. The Tunnels plugin has neither: it publishes the chosen port with no authentication.
 No software was installed, built, or run. No tunnel was created.
 
 **Verified-source** means confirmed in repository documentation or code. It does not mean independently tested.
@@ -21,7 +22,7 @@ Sources: [release](https://github.com/anomalyco/opentunnel/releases/tag/v0.5.1),
 **Verified-source:** OpenTunnel retains a tunnel identity and hostname in a persistent profile. Restarts do not inherently change the URL.
 A fixed route such as `lazyrex` gives `https://lazyrex.<id>.opentunnel.xyz`.
 The random `<id>` belongs to the tunnel; it is not regenerated on every connection.
-**Inferred:** this can provide the stable origin that LazyRex needs for its PWA, if LazyRex preserves the profile identity and route.
+**LazyRex context (the Tunnels plugin does not do this).** **Inferred:** this can provide the stable origin that LazyRex needs for its PWA, if LazyRex preserves the profile identity and route.
 This is not a promise of permanent hosted service or recoverability after credential loss. [CLI and files](https://github.com/anomalyco/opentunnel/blob/a53e64c142ecfe18bbd902bada4345d67fb540c2/packages/cli/README.md)
 
 ## 1. Architecture, hosting, license, and maturity
@@ -118,7 +119,7 @@ The local TLS acceptor uses `with_no_client_auth()`, so it does not require visi
 The local target sees a loopback connection, the visitor's unchanged `Host`, and any visitor-supplied forwarding headers.
 OpenTunnel does not sanitize those headers or make them trusted. [Trust boundary](https://github.com/anomalyco/opentunnel/blob/a53e64c142ecfe18bbd902bada4345d67fb540c2/docs/trust-boundary.md)
 
-**Inferred for LazyRex:** the gateway must enforce pairing/login and authorization on HTTP and WebSocket access.
+**LazyRex context (the Tunnels plugin does not do this).** **Inferred for LazyRex:** the gateway must enforce pairing/login and authorization on HTTP and WebSocket access.
 It must validate allowed Host/Origin values and protect state-changing requests.
 It must not grant local privileges just because the peer is loopback.
 Keep local-only administrative endpoints on a separate listener that the plugin never exposes.
@@ -132,7 +133,7 @@ Do not expose the raw Rex API as the route target. [Trust boundary](https://gith
 There is also a local Unix control socket with JSON-line `status`, `reload`, and `stop` requests.
 The CLI status command prints human-readable output; no `--json` flag appears in the reviewed command definition. [CLI](https://github.com/anomalyco/opentunnel/blob/a53e64c142ecfe18bbd902bada4345d67fb540c2/packages/cli/README.md), [control protocol](https://github.com/anomalyco/opentunnel/blob/a53e64c142ecfe18bbd902bada4345d67fb540c2/crates/opentunnel-cli/src/control.rs), [command definition](https://github.com/anomalyco/opentunnel/blob/a53e64c142ecfe18bbd902bada4345d67fb540c2/crates/opentunnel-cli/src/main.rs)
 
-**Proposed simplest integration:** A Rex Lua plugin calls short CLI commands through the existing process interface and lets OpenTunnel supervise its own daemon.
+**Research proposal (not implemented). The plugin runs `serve` in a Rex block, with one profile for each port.** Proposed simplest integration: A Rex Lua plugin calls short CLI commands through the existing process interface and lets OpenTunnel supervise its own daemon.
 Use a dedicated profile. Expose “Enable,” “Disable,” “Copy public URL,” and connection status.
 Keep credentials out of plugin events and terminal logs. This requires no new HTTP/TLS implementation in Lua.
 The local control socket is useful for structured status, but Rex Lua needs a socket helper or Go support to access it.
@@ -151,17 +152,17 @@ Either way, preserve the profile, use a fixed route, expose only the authenticat
 Before acceptance, test restart URL stability, WebSocket upgrade/binary traffic, idle recovery, gateway authentication, and service shutdown on the selected release.
 These are proposed future checks. None was run during this read-only research.
 
-## Observed with the Tunnels plugin (Claude, 2026-10-17, opentunnel 0.5.2 from Homebrew)
+## Observed with the Tunnels plugin (opentunnel 0.5.2 from Homebrew)
 
-The maintainer approved one real lab tunnel per test run to a 127.0.0.1 test server, and profiles `lazyrex-<port>` with the up/down step.
+One test run opened one real tunnel to a test server on 127.0.0.1, with profiles `lazyrex-<port>` and the up/down step.
 
 **Verified-source (v0.5.2):** `serve` does not create an identity. Only `up` and `route add` create one, and both register the launchd service `xyz.opentunnel.<profile>`. `down` removes the registration. The launchd plist sets only `OPENTUNNEL_DAEMON`, so XDG directories cannot isolate a lab profile.
 
-**Observed (lab, `tests/tunnels-lab.mjs` with `TUNNELS_REAL=1`; that test is removed, see the git history):**
+**Observed (lab, `tests/tunnels-lab.mjs` with `TUNNELS_REAL=1`; an earlier lab test with a real tunnel):**
 
 - A new profile prints "Waiting for certificate verification (this can take a few minutes)". It took about one minute in three runs.
 - `up` then `down` left no plist in `~/Library/LaunchAgents`. The route file `~/.config/opentunnel/<profile>.toml` with `"@" = "127.0.0.1:<port>"` and a foreground `serve` connected: `serve` logs `event={"type":"connecting",...}` and then `event={"type":"connected",...}`.
 - The URL `https://<id>.opentunnel.xyz` returned the test server's fixed string.
 - Closing the block (Stop) or destroying its session ended `serve`. The URL then failed with `SSL_ERROR_SYSCALL`.
-- `delete --yes` removed `~/.local/share/opentunnel/<profile>`. The test also removes the profile's route file and state directory itself; it did not check whether `delete` removes them. After the cleanup, empty `~/.config/opentunnel`, `~/.local/share/opentunnel` and `~/.local/state/opentunnel` directories remained (untested which program leaves each one).
-- `opentunnel` is at `/opt/homebrew/bin`. A Rex pane does not get a login PATH, so the plugin looks there itself.
+- `delete --yes` removed `~/.local/share/opentunnel/<profile>`. The test also removes the profile's route file and state directory itself; it did not check whether `delete` removes them. The plugin does not run `delete`. It keeps the profile and its route file. After the cleanup, empty `~/.config/opentunnel`, `~/.local/share/opentunnel` and `~/.local/state/opentunnel` directories remained (untested which program leaves each one).
+- A Rex pane has no login PATH. The plugin uses `LAZYREX_TUNNELS_OPENTUNNEL`, or else it looks in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.cargo/bin` and `~/.local/bin`.
